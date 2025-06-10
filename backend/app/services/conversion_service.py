@@ -124,79 +124,24 @@ class ConversionService:
             # 模型服務在獨立進程中需要重新初始化
             self.model_service = ModelService()
             
-            # 重要：轉換任務開始時先主動掃描模型目錄，確保能找到最新上傳的模型
-            print(f"轉換任務開始前掃描模型目錄...")
-            self.model_service._scan_model_repository()
+            print(f"轉換任務開始，源模型ID: {job.source_model_id}")
             
-            # 獲取源模型信息 - 源模型ID
-            source_model_id = job.source_model_id
-            print(f"轉換任務使用的源模型ID: {source_model_id}")
+            # 獲取源模型信息
+            source_model = self.model_service.get_model_by_id(job.source_model_id)
             
-            # 1. 首先嘗試直接通過ID獲取模型
-            source_model = self.model_service.get_model_by_id(source_model_id)
-            
-            # 2. 如果找不到，嘗試通過檢查所有模型的metadata中的original_id或model_id字段
-            if not source_model:
-                print(f"直接通過ID找不到源模型: {source_model_id}，嘗試檢查metadata")
-                # 嘗試找到與source_model_id相關的模型
-                for m_id, model in self.model_service.models.items():
-                    if model.metadata:
-                        # 檢查metadata中的各種可能ID字段
-                        meta_ids = [
-                            model.metadata.get("original_id"),
-                            model.metadata.get("model_id")
-                        ]
-                        if source_model_id in meta_ids or m_id == source_model_id:
-                            source_model = model
-                            print(f"通過metadata找到模型: {model.id}")
-                            break
-            
-            # 3. 如果仍然找不到，嘗試直接搜索model_repository目錄
-            if not source_model:
-                print(f"通過metadata仍找不到源模型，嘗試搜索模型目錄")
-                model_repo = os.environ.get("MODEL_REPOSITORY_PATH", "model_repository")
-                
-                # 搜索所有子目錄中的metadata.json
-                for model_dir in os.listdir(model_repo):
-                    model_path = os.path.join(model_repo, model_dir)
-                    if os.path.isdir(model_path):
-                        metadata_file = os.path.join(model_path, "metadata.json")
-                        if os.path.exists(metadata_file):
-                            try:
-                                with open(metadata_file, 'r') as f:
-                                    metadata = json.load(f)
-                                    if ('model_id' in metadata and metadata['model_id'] == source_model_id) or \
-                                       ('original_id' in metadata and metadata['original_id'] == source_model_id):
-                                        print(f"在目錄 {model_dir} 中找到匹配的模型ID")
-                                        # 強制掃描此模型
-                                        self.model_service._scan_model_repository()
-                                        source_model = self.model_service.get_model_by_id(source_model_id)
-                                        if source_model:
-                                            print(f"通過重新掃描找到源模型: {source_model.id}")
-                                            break
-                            except Exception as e:
-                                print(f"讀取metadata.json時出錯: {str(e)}")
-            
-            # 4. 如果通過所有方法仍找不到模型，嘗試使用模型名稱查找
+            # 如果直接通過ID找不到，嘗試通過參數中的模型名稱查找
             if not source_model and 'model_name' in job.parameters:
                 model_name = job.parameters['model_name']
-                print(f"嘗試通過模型名稱 '{model_name}' 查找")
-                for m_id, model in self.model_service.models.items():
-                    if model.name.lower() == model_name.lower():
-                        source_model = model
-                        print(f"通過模型名稱找到模型: {model.id}")
-                        # 更新任務的源模型ID
-                        job.source_model_id = model.id
-                        self._save_jobs()
-                        break
+                print(f"通過ID找不到源模型，嘗試通過名稱查找: {model_name}")
+                source_model = self.model_service.get_model_by_name(model_name)
+                if source_model:
+                    print(f"通過模型名稱找到源模型: {source_model.name} (ID: {source_model.id})")
+                    # 更新任務的源模型ID
+                    job.source_model_id = source_model.id
+                    self._save_jobs()
             
             if not source_model:
-                # 輸出當前可用的所有模型ID，幫助診斷
-                all_ids = list(self.model_service.models.keys())
-                print(f"找不到源模型，ID: {source_model_id}")
-                print(f"當前所有模型ID: {all_ids}")
-                
-                raise Exception(f"無法找到源模型ID: {source_model_id}")
+                raise Exception(f"無法找到源模型，ID: {job.source_model_id}")
             
             print(f"開始處理轉換任務: {job_id}, 源模型: {source_model.name} (ID: {source_model.id})")
             
@@ -621,7 +566,7 @@ instance_group [
             model_dir = os.path.dirname(os.path.dirname(target_path))
             model_name = os.path.basename(model_dir)  # 使用目錄名作為模型名稱
             
-            # 創建模型ID (使用UUID)
+            # 生成新的唯一模型ID
             model_id = str(uuid.uuid4())
             
             # 創建模型信息
@@ -633,30 +578,35 @@ instance_group [
                 path=target_path,
                 size_mb=file_size_mb,
                 created_at=datetime.now(timezone.utc),
-                description=f"Triton Inference Server模型: {model_name}",
+                description=f"轉換後的模型: {model_name}",
                 metadata={
+                    "model_id": model_id,
+                    "display_name": model_name,
+                    "type": source_model.type.value,
+                    "format": target_format.value,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
                     "is_trt_model": True,
                     "triton_model_name": model_name,
                     "triton_model_dir": model_dir,
                     "version": "1",
                     "platform": "tensorrt_plan" if target_format == ModelFormat.ENGINE else "onnxruntime_onnx",
-                    # 保存源模型信息
-                    "source_model_id": source_model.id,
+                    # 保存源模型信息（使用名稱而非ID）
                     "source_model_name": source_model.name,
-                    "source_model_path": source_model.path,
                     "source_model_type": source_model.type.value,
                     "source_model_format": source_model.format.value,
                     # 轉換信息
                     "conversion_precision": precision.value,
-                    "conversion_target_format": target_format.value,
-                    "original_id": model_id
+                    "conversion_target_format": target_format.value
                 }
             )
+            
+            # 保存目標模型到model_service
+            self.model_service.save_model(target_model)
             
             return target_model
             
         except Exception as e:
-            logger.error(f"創建目標模型信息失敗: {str(e)}")
+            print(f"創建目標模型信息失敗: {str(e)}")
             raise Exception(f"創建目標模型信息失敗: {str(e)}")
     
     def _load_jobs(self):

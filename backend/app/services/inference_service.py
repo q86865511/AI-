@@ -1104,46 +1104,40 @@ class InferenceService:
                 return await self._validate_pytorch_model(model, dataset_id, dataset_name, dataset_path, batch_size, custom_params)
             elif model.format.value in ["onnx", "engine"]:
                 # 對於轉換後的模型，需要找到源PyTorch模型
-                source_model_path = None
                 source_model = None
                 
-                # 策略1: 通過metadata中的source_model_id查找
-                if model.metadata and model.metadata.get("source_model_id"):
-                    source_model_id = model.metadata["source_model_id"]
-                    source_model = model_service.get_model_by_id(source_model_id)
-                    if source_model and source_model.format.value == "pt":
-                        source_model_path = source_model.path
-                        print(f"通過source_model_id找到源模型: {source_model.name}")
-                
-                # 策略2: 通過metadata中的source_model_name查找同名PT模型
-                if not source_model_path and model.metadata and model.metadata.get("source_model_name"):
+                # 策略1: 通過metadata中的source_model_name查找
+                if model.metadata and model.metadata.get("source_model_name"):
                     source_name = model.metadata["source_model_name"]
-                    # 在所有PT模型中查找同名模型
-                    for m_id, m in model_service.models.items():
-                        if m.format.value == "pt" and m.name == source_name:
-                            source_model_path = m.path
-                            source_model = m
-                            print(f"通過模型名稱找到源模型: {m.name}")
-                            break
+                    source_model = model_service.get_model_by_name(source_name)
+                    if source_model and source_model.format.value == "pt":
+                        print(f"通過source_model_name找到源模型: {source_model.name}")
                 
-                # 策略3: 通過模型名稱推斷源模型名稱
-                if not source_model_path:
+                # 策略2: 通過模型名稱推斷源模型名稱
+                if not source_model:
                     # 從轉換後的模型名稱中提取源模型名稱
                     # 例如: test_engine_fp32_batch1_size640 -> test
                     model_name_parts = model.name.split('_')
-                    if len(model_name_parts) >= 2:
+                    if len(model_name_parts) >= 1:
                         # 取第一部分作為源模型名稱
                         potential_source_name = model_name_parts[0]
-                        for m_id, m in model_service.models.items():
-                            if m.format.value == "pt" and m.name == potential_source_name:
-                                source_model_path = m.path
-                                source_model = m
-                                print(f"通過名稱推斷找到源模型: {m.name}")
-                                break
+                        source_model = model_service.get_model_by_name(potential_source_name)
+                        if source_model and source_model.format.value == "pt":
+                            print(f"通過名稱推斷找到源模型: {source_model.name}")
                 
-                if not source_model_path or not os.path.exists(source_model_path):
-                    # 如果找不到源模型，拋出錯誤而不是使用默認模型
-                    raise Exception(f"找不到源PyTorch模型進行驗證。模型: {model.name}, 查找的源模型信息: {model.metadata.get('source_model_name') if model.metadata else 'None'}")
+                # 策略3: 查找同類型的PT模型
+                if not source_model:
+                    all_models = model_service.get_models(skip=0, limit=1000)
+                    for candidate in all_models:
+                        if (candidate.format.value == "pt" and 
+                            candidate.type == model.type and
+                            candidate.name != model.name):
+                            source_model = candidate
+                            print(f"通過類型匹配找到源模型: {source_model.name}")
+                            break
+                
+                if not source_model:
+                    raise Exception(f"找不到源PyTorch模型進行驗證。模型: {model.name}")
                 
                 return await self._validate_converted_model(model, source_model, dataset_id, dataset_name, dataset_path, batch_size, custom_params)
             else:
@@ -1186,7 +1180,7 @@ class InferenceService:
             yolo_model = YOLO(model.path)
             metrics = yolo_model.val(data=yaml_file, **validation_params)
             validation_results = metrics.results_dict
-            
+                
             # 格式化結果
             return self._format_validation_results(model.id, model.name, dataset_id, dataset_name, batch_size, validation_results)
             
@@ -1201,7 +1195,7 @@ class InferenceService:
             yaml_file = self._find_dataset_yaml(dataset_name, dataset_path)
             if not yaml_file:
                 raise Exception(f"找不到數據集 {dataset_name} 的YAML配置文件")
-            
+                
             # 準備驗證參數
             validation_params = {
                 "batch": batch_size,
@@ -1217,7 +1211,7 @@ class InferenceService:
             
             # 首先用源模型創建驗證器
             yolo_model = YOLO(source_model.path)
-            
+                
             # 然後設置使用轉換後的模型進行推理
             if model.format.value == "onnx":
                 validation_params["format"] = "onnx"
@@ -1225,7 +1219,7 @@ class InferenceService:
             elif model.format.value == "engine":
                 validation_params["format"] = "engine"
                 validation_params["model"] = model.path
-            
+                
             # 執行驗證
             metrics = yolo_model.val(data=yaml_file, **validation_params)
             validation_results = metrics.results_dict
@@ -1307,4 +1301,4 @@ class InferenceService:
             if "speed/postprocess(ms)" in validation_results:
                 formatted_results["metrics"]["postprocess_time_ms"] = float(validation_results["speed/postprocess(ms)"])
         
-        return formatted_results 
+        return formatted_results
