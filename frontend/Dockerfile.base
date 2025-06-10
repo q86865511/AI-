@@ -1,0 +1,10 @@
+FROM node:18-alpine
+
+# 設置工作目錄
+WORKDIR /app
+
+# 複製package.json和package-lock.json
+COPY package*.json ./
+
+# 安裝依賴
+RUN npm install 

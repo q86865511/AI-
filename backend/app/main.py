@@ -1,0 +1,53 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+import os
+
+from app.routers import models, conversion, inference, benchmark
+
+# 創建FastAPI應用
+app = FastAPI(
+    title="YOLO模型自動化轉換與測試系統",
+    description="提供YOLO模型轉換為TensorRT格式並進行測試的系統",
+    version="1.0.0"
+)
+
+# 配置CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 實際部署時應限制來源
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 掛載靜態文件目錄
+uploads_dir = os.path.join(os.getcwd(), "uploads")
+if not os.path.exists(uploads_dir):
+    os.makedirs(uploads_dir)
+app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
+
+# 掛載路由
+app.include_router(models.router, prefix="/api/models", tags=["模型管理"])
+app.include_router(conversion.router, prefix="/api/conversion", tags=["模型轉換"])
+app.include_router(inference.router, prefix="/api/inference", tags=["模型推理"])
+app.include_router(benchmark.router, prefix="/api/benchmark", tags=["性能基準測試"])
+
+# 根路由
+@app.get("/", tags=["健康檢查"])
+async def root():
+    """
+    API根路徑，可用於健康檢查
+    """
+    return {"status": "online", "message": "YOLO模型自動化轉換與測試系統API已運行"}
+
+# 應用啟動與關閉事件
+@app.on_event("startup")
+async def startup_event():
+    """應用啟動時執行"""
+    print("應用已啟動，初始化服務...")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """應用關閉時執行"""
+    print("應用即將關閉，清理資源...") 

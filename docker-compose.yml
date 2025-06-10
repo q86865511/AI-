@@ -1,0 +1,54 @@
+services:
+  backend-base:
+    image: sys-backend-base
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.base
+
+  backend:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    volumes:
+      - ./backend:/app
+      - ./model_repository:/app/model_repository
+    ports:
+      - "8000:8000"
+    mem_limit: 16g
+    shm_size: '8gb'
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+    environment:
+      - MODEL_REPOSITORY_PATH=/app/model_repository
+      - PYTHONUNBUFFERED=1
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --log-level=debug
+    depends_on:
+      - backend-base
+
+  frontend-base:
+    image: sys-frontend-base
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.base
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "3000:3000"
+    mem_limit: 16g
+    shm_size: '8gb'
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+    depends_on:
+      - frontend-base
+      - backend 
