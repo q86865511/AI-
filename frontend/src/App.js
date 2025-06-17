@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Route, Routes, Link } from 'react-router-dom';
+import React, { useState, useEffect } from 'react';
+import { Route, Routes, Link, useLocation } from 'react-router-dom';
 import { Layout, Menu, Typography, ConfigProvider } from 'antd';
 import zhTW from 'antd/locale/zh_TW';
 import {
@@ -7,7 +7,8 @@ import {
   CloudUploadOutlined,
   DashboardOutlined,
   FundViewOutlined,
-  BarChartOutlined
+  BarChartOutlined,
+  FileSearchOutlined
 } from '@ant-design/icons';
 import './App.css';
 
@@ -17,12 +18,33 @@ import ModelsPage from './pages/ModelsPage';
 import ConversionPage from './pages/ConversionPage';
 import BenchmarkPage from './pages/BenchmarkPage';
 import PerformanceAnalyzerPage from './pages/PerformanceAnalyzerPage';
+import TestResultsPage from './pages/TestResultsPage';
 
 const { Header, Sider, Content, Footer } = Layout;
 const { Title } = Typography;
 
 function App() {
   const [collapsed, setCollapsed] = useState(false);
+  const [selectedKeys, setSelectedKeys] = useState(['1']);
+  const location = useLocation();
+
+  // 根據當前路由設置選中的菜單項
+  useEffect(() => {
+    const pathname = location.pathname;
+    if (pathname === '/') {
+      setSelectedKeys(['1']);
+    } else if (pathname === '/models') {
+      setSelectedKeys(['2']);
+    } else if (pathname === '/upload') {
+      setSelectedKeys(['3']);
+    } else if (pathname === '/benchmark') {
+      setSelectedKeys(['4']);
+    } else if (pathname.startsWith('/test-results')) {
+      setSelectedKeys(['5']);
+    } else if (pathname.startsWith('/performance')) {
+      setSelectedKeys(['6']);
+    }
+  }, [location.pathname]);
 
   const toggleCollapsed = () => {
     setCollapsed(!collapsed);
@@ -44,7 +66,7 @@ function App() {
             </div>
             <Menu
               theme="dark"
-              defaultSelectedKeys={['1']}
+              selectedKeys={selectedKeys}
               mode="inline"
               items={[
                 {
@@ -54,18 +76,23 @@ function App() {
                 },
                 {
                   key: '2',
-                  icon: <CloudUploadOutlined />,
-                  label: <Link to="/upload">模型優化</Link>,
+                  icon: <DashboardOutlined />,
+                  label: <Link to="/models">模型管理</Link>,
                 },
                 {
                   key: '3',
-                  icon: <DashboardOutlined />,
-                  label: <Link to="/models">模型管理</Link>,
+                  icon: <CloudUploadOutlined />,
+                  label: <Link to="/upload">模型優化</Link>,
                 },
                 {
                   key: '4',
                   icon: <FundViewOutlined />,
                   label: <Link to="/benchmark">自動化轉換與測試</Link>,
+                },
+                {
+                  key: '5',
+                  icon: <FileSearchOutlined />,
+                  label: <Link to="/test-results">測試結果查看</Link>,
                 },
                 {
                   key: '6',
@@ -95,6 +122,9 @@ function App() {
                   <Route path="/models" element={<ModelsPage />} />
                   <Route path="/benchmark" element={<BenchmarkPage />} />
                   <Route path="/performance-analyzer" element={<PerformanceAnalyzerPage />} />
+                  <Route path="/performance/:taskId" element={<PerformanceAnalyzerPage />} />
+                  <Route path="/test-results" element={<TestResultsPage />} />
+                  <Route path="/test-results/:taskId" element={<TestResultsPage />} />
                 </Routes>
               </div>
             </Content>

@@ -152,8 +152,24 @@ class TestManager:
         if model_type not in ["object", "pose"]:
             raise Exception(f"不支持的模型類型: {model_type}，必須為 'object' 或 'pose'")
         
-        # 生成所有測試組合
+        # 生成所有測試組合，包含原始模型
         combinations = []
+        
+        # 首先添加原始模型的測試組合
+        for batch_size in batch_sizes:
+            combinations.append({
+                "batch_size": batch_size,
+                "precision": "original",  # 標記為原始模型
+                "image_size": image_size,
+                "status": "completed",  # 原始模型不需要轉換
+                "conversion_job_id": None,
+                "target_model_id": model_id,  # 直接使用源模型ID
+                "inference_results": None,
+                "error": None,
+                "is_original": True  # 新增標記以區分原始模型
+            })
+        
+        # 然後添加轉換後模型的測試組合
         for precision in precisions:
             precision_enum = PrecisionType.FP16 if precision.lower() == 'fp16' else PrecisionType.FP32
             for batch_size in batch_sizes:
@@ -165,7 +181,8 @@ class TestManager:
                     "conversion_job_id": None,
                     "target_model_id": None,
                     "inference_results": None,
-                    "error": None
+                    "error": None,
+                    "is_original": False  # 標記為轉換模型
                 })
         
         # 創建任務數據
@@ -215,7 +232,6 @@ class TestManager:
             if task["status"] != "failed" and task["status"] != "aborted":
                 task["current_step"] = "validation"
                 task["current_combination_index"] = 0
-                task["completed_combinations"] = 0
                 self._save_tasks()
                 
                 await self._process_validation_step(task)
@@ -224,7 +240,6 @@ class TestManager:
             if task["status"] != "failed" and task["status"] != "aborted":
                 task["current_step"] = "inference"
                 task["current_combination_index"] = 0
-                task["completed_combinations"] = 0
                 self._save_tasks()
                 
                 await self._process_inference_step(task)
@@ -234,13 +249,15 @@ class TestManager:
                 # 統計成功和失敗的組合數
                 successful_combinations = 0
                 failed_combinations = 0
-                
                 for combination in task["combinations"]:
                     # 檢查轉換是否成功
                     if combination.get("status") == "completed":
-                        # 檢查驗證和推理是否至少有一個成功
-                        if (combination.get("validation_status") == "completed" or 
-                            combination.get("inference_status") == "completed"):
+                        # 檢查驗證和推理狀態
+                        validation_success = combination.get("validation_status") == "completed"
+                        inference_success = combination.get("inference_status") == "completed"
+                        
+                        # 需要驗證和推理都成功才算成功
+                        if validation_success and inference_success:
                             successful_combinations += 1
                         else:
                             failed_combinations += 1
@@ -290,13 +307,25 @@ class TestManager:
             task["current_combination_index"] = i
             self._save_tasks()
             
+            # 允許其他異步操作執行
+            await asyncio.sleep(0.1)
+            
             try:
                 # 獲取組合參數
                 batch_size = combination["batch_size"]
                 precision = combination["precision"]
                 image_size = combination["image_size"]
+                is_original = combination.get("is_original", False)
                 
                 print(f"處理組合 {i+1}/{len(combinations)}: 批次={batch_size}, 精度={precision}")
+                
+                # 如果是原始模型，跳過轉換步驟
+                if is_original:
+                    print(f"跳過原始模型轉換: 組合 {i+1}")
+                    combination["status"] = "completed"
+                    task["completed_combinations"] += 1
+                    self._save_tasks()
+                    continue
                 
                 # 準備轉換參數
                 precision_enum = PrecisionType.FP16 if precision.lower() == 'fp16' else PrecisionType.FP32
@@ -448,6 +477,9 @@ class TestManager:
             task["current_combination_index"] = i
             self._save_tasks()
             
+            # 允許其他異步操作執行
+            await asyncio.sleep(0.1)
+            
             # 只處理轉換成功的組合
             if combination["status"] != "completed" or not combination["target_model_id"]:
                 continue
@@ -478,10 +510,14 @@ class TestManager:
                 inference_service = InferenceService()
                 inference_service.model_service = self.model_service  # 使用相同的模型服務實例
                 
-                # 執行模型驗證
+                # 執行模型驗證（添加異步睡眠以允許其他操作）
                 try:
                     # 測試連接和引用
                     print(f"準備執行驗證: 模型ID={target_model_id}, 模型名稱={target_model.name}, 數據集ID={dataset_id}")
+                    
+                    # 短暫睡眠以允許其他異步操作執行
+                    await asyncio.sleep(0.1)
+                    
                     validation_results = await inference_service.validate_model(
                         model_id=target_model_id,
                         dataset_id=dataset_id,
@@ -492,7 +528,6 @@ class TestManager:
                     # 保存驗證結果
                     combination["validation_results"] = validation_results
                     combination["validation_status"] = "completed"
-                    task["completed_combinations"] += 1
                     print(f"驗證完成: 模型ID={target_model_id}, 結果={validation_results}")
                 except Exception as validation_error:
                     print(f"驗證執行錯誤: {str(validation_error)}")
@@ -531,6 +566,9 @@ class TestManager:
         
         print(f"開始執行推論測試步驟，迭代次數: {iterations}")
         
+        # 重置推論階段的完成計數，使用獨立計數器
+        inference_completed = 0
+        
         # 遍歷所有組合
         for i, combination in enumerate(combinations):
             # 檢查任務是否被中止
@@ -541,6 +579,9 @@ class TestManager:
             # 更新當前處理的組合索引
             task["current_combination_index"] = i
             self._save_tasks()
+            
+            # 允許其他異步操作執行
+            await asyncio.sleep(0.1)
             
             # 只處理轉換成功的組合
             if combination["status"] != "completed" or not combination["target_model_id"]:
@@ -568,10 +609,14 @@ class TestManager:
                 inference_service = InferenceService()
                 inference_service.model_service = self.model_service  # 使用相同的模型服務實例
                 
-                # 執行推論測試
+                # 執行推論測試（添加異步睡眠以允許其他操作）
                 try:
                     # 測試連接和引用
                     print(f"準備執行推論測試: 模型ID={target_model_id}, 模型名稱={target_model.name}, 批次={batch_size}")
+                    
+                    # 短暫睡眠以允許其他異步操作執行
+                    await asyncio.sleep(0.1)
+                    
                     inference_results = await inference_service.benchmark_model(
                         model_id=target_model_id,
                         batch_size=batch_size,
@@ -582,8 +627,16 @@ class TestManager:
                     
                     # 保存推理結果
                     combination["inference_results"] = inference_results
-                    combination["inference_status"] = "completed"
-                    print(f"推論測試完成: 模型ID={target_model_id}, 結果={inference_results}")
+                    
+                    # 檢查推理狀態
+                    if inference_results.get("status") == "failed":
+                        combination["inference_status"] = "failed"
+                        combination["inference_error"] = inference_results.get("error", "推論測試失敗")
+                        print(f"推論測試失敗: 模型ID={target_model_id}, 錯誤={inference_results.get('error')}")
+                    else:
+                        combination["inference_status"] = "completed"
+                        print(f"推論測試完成: 模型ID={target_model_id}, 結果={inference_results}")
+                        
                 except Exception as inference_error:
                     print(f"推論測試執行錯誤: {str(inference_error)}")
                     # 如果推論測試執行失敗，記錄錯誤但繼續進行
@@ -594,11 +647,18 @@ class TestManager:
                         "model_id": target_model_id,
                         "error": str(inference_error),
                         "avg_inference_time_ms": 0.0,
-                        "throughput_fps": 0.0
+                        "throughput_fps": 0.0,
+                        "status": "failed"
                     }
                 
-                task["completed_combinations"] += 1
+                # 更新推論完成計數（無論成功或失敗）
+                inference_completed += 1
+                
+                # 即時保存任務狀態，確保前端能看到最新結果
                 self._save_tasks()
+                
+                # 為前端顯示產生當前組合的臨時結果
+                self._update_current_combination_result(task, i, combination)
                 
                 # 保存結果到獨立文件（使用新的目錄結構）
                 task_results_dir = os.path.join(
@@ -633,11 +693,12 @@ class TestManager:
                 print(traceback.format_exc())
                 combination["inference_status"] = "failed"
                 combination["inference_error"] = str(e)
+                inference_completed += 1  # 即使失敗也計入完成數
                 self._save_tasks()
                 
                 # 繼續下一個組合，不中斷整個任務
         
-        print(f"推論測試步驟完成，完成組合數: {task['completed_combinations']}/{len(combinations)}")
+        print(f"推論測試步驟完成，完成組合數: {inference_completed}/{len(combinations)}")
         
         # 生成最終的測試結果JSON文件
         self._generate_final_results(task)
@@ -848,13 +909,17 @@ class TestManager:
                         errors["validation"] = combination.get("validation_error")
                     
                     # 檢查推理狀態
-                    if combination.get("inference_status") == "failed":
+                    elif combination.get("inference_status") == "failed":
                         combination_status = "failed"
                         errors["inference"] = combination.get("inference_error")
                     
                     # 如果都成功，則標記為成功
-                    if not errors:
+                    elif (combination.get("validation_status") == "completed" and 
+                          combination.get("inference_status") == "completed"):
                         combination_status = "completed"
+                    else:
+                        # 部分完成或仍在處理中
+                        combination_status = "failed"
                 
                 # 構建結果記錄
                 result = {
@@ -867,9 +932,10 @@ class TestManager:
                     "errors": errors if errors else None,
                 }
                 
-                # 如果有驗證結果，添加關鍵指標
-                if combination.get("validation_results") and combination.get("validation_status") == "completed":
-                    metrics = combination["validation_results"].get("metrics", {})
+                # 如果有驗證結果，添加關鍵指標和GPU監控數據
+                validation_results = combination.get("validation_results")
+                if validation_results and combination.get("validation_status") == "completed":
+                    metrics = validation_results.get("metrics", {})
                     result["validation_metrics"] = {
                         "mAP50": metrics.get("mAP50", 0.0),
                         "mAP50_95": metrics.get("mAP50_95", 0.0),
@@ -878,12 +944,19 @@ class TestManager:
                     }
                 
                 # 如果有推理結果，添加性能指標
-                if combination.get("inference_results") and combination.get("inference_status") == "completed":
+                inference_results = combination.get("inference_results")
+                if inference_results and combination.get("inference_status") == "completed":
                     result["performance_metrics"] = {
-                        "avg_inference_time_ms": combination["inference_results"].get("avg_inference_time_ms", 0.0),
-                        "throughput_fps": combination["inference_results"].get("throughput_fps", 0.0),
-                        "memory_usage_mb": combination["inference_results"].get("memory_usage_mb", 0.0),
-                        "avg_gpu_load": combination["inference_results"].get("avg_gpu_load", 0.0)
+                        "avg_inference_time_ms": inference_results.get("avg_inference_time_ms", 0.0),
+                        "throughput_fps": inference_results.get("avg_throughput_fps", 0.0),
+                        # 優先使用驗證結果中的GPU監控數據，如果沒有則使用推理結果中的
+                        "memory_usage_mb": validation_results.get("memory_usage_mb", inference_results.get("memory_usage_mb", 0.0)) if validation_results else inference_results.get("memory_usage_mb", 0.0),
+                        "avg_gpu_load": validation_results.get("avg_gpu_load", inference_results.get("avg_gpu_load", 0.0)) if validation_results else inference_results.get("avg_gpu_load", 0.0),
+                        # 添加更多GPU監控字段
+                        "max_gpu_load": validation_results.get("max_gpu_load", 0.0) if validation_results else 0.0,
+                        "model_vram_mb": validation_results.get("model_vram_mb", 0.0) if validation_results else 0.0,
+                        "monitoring_samples": validation_results.get("monitoring_samples", 0) if validation_results else 0,
+                        "monitoring_duration_s": validation_results.get("monitoring_duration_s", 0.0) if validation_results else 0.0
                     }
                 
                 results.append(result)
@@ -895,8 +968,8 @@ class TestManager:
                 "model_type": task.get("model_type", "object"),
                 "dataset_id": task["dataset_id"],
                 "created_at": task["created_at"],
-                "completed_at": datetime.now(timezone(timedelta(hours=8))).isoformat(),
-                "status": task["status"],
+                "completed_at": task.get("completed_at", datetime.now(timezone(timedelta(hours=8))).isoformat()),
+                "status": "completed",  # 修正：始終設為completed，因為此方法只在任務完成時調用
                 "total_combinations": task["total_combinations"],
                 "completed_combinations": task["completed_combinations"],
                 "partial_success": task.get("partial_success", False),
@@ -908,6 +981,12 @@ class TestManager:
                 },
                 "results": results
             }
+            
+            # 同時更新內存中的任務狀態
+            task["status"] = "completed"
+            if not task.get("completed_at"):
+                task["completed_at"] = datetime.now(timezone(timedelta(hours=8))).isoformat()
+            self._save_tasks()
             
             # 保存最終結果
             final_results_file = os.path.join(task_results_dir, "final_results.json")
@@ -967,7 +1046,11 @@ class TestManager:
                             "avg_inference_time_ms": result["performance_metrics"]["avg_inference_time_ms"],
                             "throughput_fps": result["performance_metrics"]["throughput_fps"],
                             "memory_usage_mb": result["performance_metrics"]["memory_usage_mb"],
-                            "avg_gpu_load": result["performance_metrics"]["avg_gpu_load"]
+                            "avg_gpu_load": result["performance_metrics"]["avg_gpu_load"],
+                            "max_gpu_load": result["performance_metrics"].get("max_gpu_load", 0.0),
+                            "model_vram_mb": result["performance_metrics"].get("model_vram_mb", 0.0),
+                            "monitoring_samples": result["performance_metrics"].get("monitoring_samples", 0),
+                            "monitoring_duration_s": result["performance_metrics"].get("monitoring_duration_s", 0.0)
                         })
                     
                     performance_data[model_id]["benchmarks"].append(benchmark)
@@ -980,4 +1063,19 @@ class TestManager:
             print(f"已生成結果分析文件: {performance_file}")
             
         except Exception as e:
-            print(f"生成結果分析文件時出錯: {str(e)}") 
+            print(f"生成結果分析文件時出錯: {str(e)}")
+    
+    def _update_current_combination_result(self, task: Dict[str, Any], combination_index: int, combination: Dict[str, Any]):
+        """更新當前組合的結果供前端實時顯示"""
+        try:
+            # 為前端提供當前組合的即時結果
+            task["current_combination_result"] = {
+                "index": combination_index,
+                "batch_size": combination["batch_size"],
+                "precision": combination["precision"],
+                "status": combination.get("inference_status", "unknown"),
+                "validation_results": combination.get("validation_results"),
+                "inference_results": combination.get("inference_results")
+            }
+        except Exception as e:
+            print(f"更新當前組合結果時出錯: {str(e)}") 

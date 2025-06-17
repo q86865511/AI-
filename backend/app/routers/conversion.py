@@ -58,18 +58,12 @@ async def list_conversion_jobs(
                 batch_size = job.parameters.get("batch_size", 1)
                 img_size = job.parameters.get("imgsz", 640)
                 
-                # 判斷參數 - 如果是engine格式，fp32精度，batch_size=1，size=640，則使用固定名稱
-                if (job.target_format == ModelFormat.ENGINE and 
-                    job.precision == PrecisionType.FP32 and 
-                    batch_size == 1 and 
-                    img_size == 640):
-                    target_model_name = "test_engine_fp32_batch1_size640"
-                else:
-                    # 否則使用原來的命名方式
-                    param_suffix = f"_{job.target_format.value}_{job.precision.value}"
-                    param_suffix += f"_batch{batch_size}"
-                    param_suffix += f"_size{img_size}"
-                    target_model_name = f"{safe_name}{param_suffix}"
+                # 使用新的命名方式，包含源模型ID
+                source_id_short = job.source_model_id[:8]
+                param_suffix = f"_{job.target_format.value}_{job.precision.value}"
+                param_suffix += f"_batch{batch_size}"
+                param_suffix += f"_size{img_size}"
+                target_model_name = f"{safe_name}_{source_id_short}{param_suffix}"
                 
                 # 檢查目標模型是否已存在
                 target_model_path = f"model_repository/{target_model_name}"
@@ -156,20 +150,14 @@ async def create_conversion_job(
     batch_size = parameters.get("batch_size", 1)
     img_size = parameters.get("imgsz", 640)
     
-    # 判斷參數 - 如果是engine格式，fp32精度，batch_size=1，size=640，則使用固定名稱
-    if (target_format == ModelFormat.ENGINE and 
-        precision == PrecisionType.FP32 and 
-        batch_size == 1 and 
-        img_size == 640):
-        target_model_name = "test_engine_fp32_batch1_size640"
-    else:
-        # 否則使用原來的命名方式
-        param_suffix = f"_{target_format.value}_{precision.value}"
-        if batch_size:
-            param_suffix += f"_batch{batch_size}"
-        if img_size:
-            param_suffix += f"_size{img_size}"
-        target_model_name = f"{safe_name}{param_suffix}"
+    # 使用新的命名方式，包含源模型ID
+    source_id_short = source_model_id[:8]
+    param_suffix = f"_{target_format.value}_{precision.value}"
+    if batch_size:
+        param_suffix += f"_batch{batch_size}"
+    if img_size:
+        param_suffix += f"_size{img_size}"
+    target_model_name = f"{safe_name}_{source_id_short}{param_suffix}"
     
     # 檢查目標模型是否已存在
     target_model_path = f"model_repository/{target_model_name}"

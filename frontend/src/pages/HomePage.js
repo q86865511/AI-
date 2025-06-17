@@ -24,10 +24,13 @@ const HomePage = () => {
       // 獲取轉換任務數量
       const conversionsResponse = await axios.get('http://localhost:8000/api/conversion/');
       
+      // 獲取自動化測試任務數量
+      const testsResponse = await axios.get('http://localhost:8000/api/benchmark/tasks');
+      
       setStats({
         modelCount: modelsResponse.data.total || 0,
         conversionCount: conversionsResponse.data.total || 0,
-        testCount: 0 // 暫時硬編碼，未來從API獲取
+        testCount: testsResponse.data.tasks ? testsResponse.data.tasks.length : 0
       });
     } catch (error) {
       console.error('獲取統計數據失敗:', error);

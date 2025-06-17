@@ -198,6 +198,10 @@ train: train2017.txt  # train images
 val: val2017.txt  # val images
 test: test-dev2017.txt  # test images
 
+# Keypoints
+kpt_shape: [17, 3]  # number of keypoints, number of dims (2 for x,y or 3 for x,y,visible)
+flip_idx: [0, 2, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11, 14, 13, 16, 15]
+
 # Classes (只有一個類別：人)
 names:
   0: person
@@ -417,6 +421,7 @@ async def get_all_tasks():
                 "task_id": task["id"],
                 "model_name": task["model_name"],
                 "created_at": task["created_at"],
+                "completed_at": task.get("completed_at"),  # 添加完成時間
                 "status": task["status"],
                 "current_step": task.get("current_step", "conversion"),  # 添加默認值
                 "total_combinations": task["total_combinations"],
@@ -477,6 +482,23 @@ async def get_test_results(task_id: str):
     if not task:
         raise HTTPException(status_code=404, detail=f"找不到測試任務: {task_id}")
     
+    # 優先嘗試從文件讀取結果（確保數據持久化）
+    try:
+        final_results_file = os.path.join(
+            "backend/data/test_tasks/inference_results", 
+            f"task_{task_id}", 
+            "final_results.json"
+        )
+        
+        if os.path.exists(final_results_file):
+            with open(final_results_file, 'r', encoding='utf-8') as f:
+                file_data = json.load(f)
+                # 確保狀態是completed
+                file_data["status"] = "completed"
+                return file_data
+    except Exception as e:
+        print(f"讀取final_results.json失敗: {str(e)}")
+    
     # 如果任務未完成，返回當前狀態
     if task["status"] != "completed":
         return {
@@ -488,25 +510,87 @@ async def get_test_results(task_id: str):
             "total_combinations": task["total_combinations"]
         }
     
-    # 提取測試結果
+    # 如果文件不存在，從內存中提取測試結果
     results = []
-    for combination in task["combinations"]:
-        if combination["status"] == "completed":
-            result = {
-                "batch_size": combination["batch_size"],
-                "precision": combination["precision"],
-                "model_id": combination["target_model_id"],
-                "validation_results": combination.get("validation_results"),
-                "inference_results": combination.get("inference_results")
+    for i, combination in enumerate(task["combinations"]):
+        result = {
+            "combination_index": i,
+            "batch_size": combination["batch_size"],
+            "precision": combination["precision"],
+            "image_size": combination.get("image_size", 640),
+            "status": combination["status"],
+            "model_id": combination.get("target_model_id"),
+            "errors": None,
+        }
+        
+        # 處理驗證結果 - 確保數據結構一致，包含GPU監控數據
+        if combination.get("validation_results"):
+            validation_results = combination["validation_results"]
+            result["validation_results"] = {
+                "model_id": validation_results.get("model_id"),
+                "model_name": validation_results.get("model_name"),
+                "dataset_id": validation_results.get("dataset_id"),
+                "dataset_name": validation_results.get("dataset_name"),
+                "batch_size": validation_results.get("batch_size"),
+                "timestamp": validation_results.get("timestamp"),
+                "metrics": validation_results.get("metrics", {}),
+                # 添加GPU監控數據
+                "memory_usage_mb": validation_results.get("memory_usage_mb"),
+                "avg_gpu_load": validation_results.get("avg_gpu_load"),
+                "max_gpu_load": validation_results.get("max_gpu_load"),
+                "monitoring_samples": validation_results.get("monitoring_samples"),
+                "model_vram_mb": validation_results.get("model_vram_mb"),
+                "monitoring_duration_s": validation_results.get("monitoring_duration_s")
             }
-            results.append(result)
+        
+        # 處理推論結果 - 確保數據結構一致
+        if combination.get("inference_results"):
+            inference_results = combination["inference_results"]
+            result["inference_results"] = {
+                "model_id": inference_results.get("model_id"),
+                "model_name": inference_results.get("model_name"),
+                "batch_size": inference_results.get("batch_size"),
+                "iterations": inference_results.get("iterations"),
+                "timestamp": inference_results.get("timestamp"),
+                "avg_inference_time_ms": inference_results.get("avg_inference_time_ms"),
+                "std_inference_time_ms": inference_results.get("std_inference_time_ms"),
+                "min_inference_time_ms": inference_results.get("min_inference_time_ms"),
+                "max_inference_time_ms": inference_results.get("max_inference_time_ms"),
+                "all_inference_times": inference_results.get("all_inference_times", []),
+                "avg_throughput_fps": inference_results.get("avg_throughput_fps"),
+                "avg_vram_usage_mb": inference_results.get("avg_vram_usage_mb"),
+                "all_vram_usages": inference_results.get("all_vram_usages", []),
+                "status": inference_results.get("status")
+            }
+        
+        # 收集錯誤信息
+        errors = {}
+        if combination.get("error"):
+            errors["conversion"] = combination["error"]
+        if combination.get("validation_error"):
+            errors["validation"] = combination["validation_error"]
+        if combination.get("inference_error"):
+            errors["inference"] = combination["inference_error"]
+        
+        if errors:
+            result["errors"] = errors
+        
+        results.append(result)
     
     return {
         "task_id": task["id"],
         "model_name": task["model_name"],
-        "status": "completed",
+        "model_type": task.get("model_type", "object"),
+        "dataset_id": task.get("dataset_id"),
+        "status": "completed",  # 確保返回completed狀態
         "created_at": task["created_at"],
-        "completed_at": task["completed_at"],
+        "completed_at": task.get("completed_at"),
+        "total_combinations": task["total_combinations"],
+        "completed_combinations": task.get("completed_combinations", 0),
+        "test_configurations": {
+            "iterations": task.get("iterations", 100),
+            "custom_params": task.get("custom_params", {})
+        },
         "results": results
     }
 
@@ -665,6 +749,36 @@ async def get_combination_detail(task_id: str, combination_index: int):
     }
     
     return result
+
+@router.get("/tasks/{task_id}/performance-analysis")
+async def get_task_performance_analysis(task_id: str):
+    """獲取測試任務的性能分析數據（JSON格式）"""
+    # 檢查任務是否存在
+    task = test_manager.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"找不到測試任務: {task_id}")
+    
+    # 檢查任務是否已完成
+    if task["status"] != "completed":
+        raise HTTPException(status_code=400, detail=f"測試任務尚未完成，當前狀態: {task['status']}")
+    
+    # 構建性能分析文件路徑
+    result_file = os.path.join(
+        test_manager.inference_results_dir,
+        f"task_{task_id}",
+        "performance_analysis.json"
+    )
+    
+    if not os.path.exists(result_file):
+        raise HTTPException(status_code=404, detail="找不到性能分析文件")
+    
+    # 讀取並返回JSON數據
+    try:
+        with open(result_file, 'r', encoding='utf-8') as f:
+            performance_data = json.load(f)
+        return performance_data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"讀取性能分析文件失敗: {str(e)}")
 
 @router.get("/download-results/{task_id}")
 async def download_test_results(task_id: str):

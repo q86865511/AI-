@@ -38,7 +38,12 @@ async def refresh_models():
         # 掃描模型儲存庫
         new_model_ids = model_service._scan_model_repository()
         # 保存更新的模型信息
-        model_service._save_models()
+        # 模型服務不需要保存，因為它是通過掃描動態載入的
+        
+        # 確保new_model_ids不為None
+        if new_model_ids is None:
+            new_model_ids = []
+        
         print(f"模型刷新成功，找到 {len(new_model_ids)} 個模型")
         return {"success": True, "message": "模型存儲庫已刷新", "new_model_ids": new_model_ids}
     except Exception as e:

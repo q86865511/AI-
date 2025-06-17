@@ -37,6 +37,54 @@ const BenchmarkPage = () => {
   const [combinationDetails, setCombinationDetails] = useState({});
   const [loadingCombinations, setLoadingCombinations] = useState({});
 
+  // 計算實際進度的函數
+  const calculateActualProgress = (status) => {
+    if (!status || !status.total_combinations) return { completed: 0, total: status?.total_combinations || 0, percent: 0 };
+    
+    const total = status.total_combinations;
+    const currentIndex = status.current_combination_index >= 0 ? status.current_combination_index + 1 : 0;
+    
+    // 根據當前階段計算進度，每個階段都是獨立的0/total
+    let completed = 0;
+    let stageProgress = "";
+    let totalPercent = 0;
+    
+    switch (status.current_step) {
+      case 'conversion':
+        // 轉換階段：顯示當前轉換進度
+        completed = currentIndex;
+        stageProgress = `轉換階段: ${completed}/${total}`;
+        totalPercent = Math.round((completed / total) * 33.33); // 轉換階段佔33%
+        break;
+      case 'validation':
+        // 驗證階段：顯示當前驗證進度
+        completed = currentIndex;
+        stageProgress = `驗證階段: ${completed}/${total}`;
+        totalPercent = 33 + Math.round((completed / total) * 33.33); // 33% + 驗證階段33%
+        break;
+      case 'inference':
+        // 推論階段：顯示當前推論進度
+        completed = currentIndex;
+        stageProgress = `推論階段: ${completed}/${total}`;
+        totalPercent = 66 + Math.round((completed / total) * 34); // 66% + 推論階段34%
+        break;
+      default:
+        completed = status.completed_combinations || 0;
+        stageProgress = `${completed}/${total}`;
+        totalPercent = status.total_combinations > 0 ? Math.round((completed / status.total_combinations) * 100) : 0;
+    }
+    
+    return {
+      completed,
+      total,
+      percent: Math.min(totalPercent, 100),
+      stageProgress
+    };
+  };
+
+  // 計算當前任務的進度數據
+  const progressData = calculateActualProgress(taskStatus);
+
   // 初始化頁面
   useEffect(() => {
     fetchModels();
@@ -86,6 +134,14 @@ const BenchmarkPage = () => {
       taskInterval = setInterval(() => {
         fetchTaskStatus(currentTask.task_id);
       }, refreshInterval);
+    }
+
+    // 如果任務完成，清除當前任務
+    if (taskStatus.status === 'completed' || taskStatus.status === 'failed' || taskStatus.status === 'aborted') {
+      setTimeout(() => {
+        setCurrentTask(null);
+        setTaskStatus({});
+      }, 2000); // 2秒後清除當前任務顯示
     }
 
     return () => {
@@ -297,8 +353,8 @@ const BenchmarkPage = () => {
   
   // 查看測試結果
   const viewResults = (taskId) => {
-    // 這裡可以跳轉到結果頁面或打開模態框
-    window.open(`/benchmark/results/${taskId}`, '_blank');
+    // 跳轉到測試結果查看頁面
+    window.open(`/test-results/${taskId}`, '_blank');
   };
   
   // 上傳數據集
@@ -429,7 +485,7 @@ const BenchmarkPage = () => {
       
       // 顯示錯誤詳情模態框
       Modal.info({
-        title: `任務錯誤詳情 - ${task.model_name}`,
+        title: '任務錯誤詳情 - ' + task.model_name,
         width: 800,
         content: (
           <div>
@@ -449,14 +505,14 @@ const BenchmarkPage = () => {
                   <Card 
                     key={idx}
                     size="small"
-                    title={`組合 ${combo.index}: 批次=${combo.batch_size}, 精度=${combo.precision}`}
+                    title={'組合 ' + combo.index + ': 批次=' + combo.batch_size + ', 精度=' + combo.precision}
                     style={{ marginBottom: 8 }}
                   >
                     {combo.errors.map((err, errIdx) => (
                       <Alert
                         key={errIdx}
                         type="error"
-                        message={`${err.stage}階段錯誤`}
+                        message={err.stage + '階段錯誤'}
                         description={err.error}
                         style={{ marginBottom: errIdx < combo.errors.length - 1 ? 8 : 0 }}
                       />
@@ -507,12 +563,23 @@ const BenchmarkPage = () => {
       render: (text) => formatDateTime(text)
     },
     {
+      title: '完成時間',
+      dataIndex: 'completed_at',
+      key: 'completed_at',
+      render: (text) => text ? formatDateTime(text) : '-'
+    },
+    {
       title: '狀態',
       dataIndex: 'status',
       key: 'status',
       render: (status, record) => (
         <div>
-          {status === 'processing' ? 
+          {/* 如果有錯誤，顯示失敗狀態 */}
+          {record.error ? (
+            <Tag color="red">
+              失敗
+            </Tag>
+          ) : status === 'processing' ? 
             <Tag color={getStatusColor(status)} icon={<SyncOutlined spin />}>
               {statusNameMap[status] || status}
             </Tag> :
@@ -520,7 +587,7 @@ const BenchmarkPage = () => {
               {statusNameMap[status] || status}
             </Tag>
           }
-          {/* 如果有錯誤，顯示錯誤圖標但不顯示詳細信息 */}
+          {/* 如果有錯誤，顯示錯誤圖標 */}
           {record.error && (
             <Tooltip title="任務執行過程中有錯誤，點擊查看詳情">
               <Button 
@@ -539,50 +606,66 @@ const BenchmarkPage = () => {
       title: '當前階段',
       dataIndex: 'current_step',
       key: 'current_step',
-      render: (step) => stepNameMap[step] || step || '未知'
+      render: (step, record) => {
+        // 如果是當前正在運行的任務，使用taskStatus中的階段信息
+        if (currentTask && currentTask.task_id === record.task_id && taskStatus.current_step) {
+          step = taskStatus.current_step;
+        }
+        
+        if (record.status === 'completed') {
+          return '已完成';
+        } else if (record.status === 'failed') {
+          return '失敗';
+        } else if (record.status === 'aborted') {
+          return '已中止';
+        }
+        return stepNameMap[step] || step || '未知';
+      }
     },
     {
       title: '進度',
-      key: 'progress',
-      render: (_, record) => {
-        // 如果有成功/失敗統計，顯示詳細信息
-        if (record.partial_success || record.success_count !== undefined) {
-          return (
-            <Tooltip title={`成功: ${record.success_count || 0}, 失敗: ${record.fail_count || 0}`}>
-              <span>
-                {record.completed_combinations}/{record.total_combinations}
-                {record.partial_success && (
-                  <Tag color="orange" style={{ marginLeft: 8 }}>部分成功</Tag>
-                )}
-              </span>
-            </Tooltip>
-          );
-        }
-        return <span>{record.completed_combinations}/{record.total_combinations}</span>;
+              key: 'progress',
+        render: (_, record) => {
+         // 使用統一的進度計算函數
+         const progressData = calculateActualProgress(record);
+
+                  // 如果有成功/失敗統計，顯示詳細信息
+          if (record.partial_success || record.success_count !== undefined) {
+            return (
+              <Tooltip title={'成功: ' + (record.success_count || 0) + ', 失敗: ' + (record.fail_count || 0)}>
+                <span>
+                 {progressData.stageProgress || `${progressData.completed}/${progressData.total}`}
+                 {record.partial_success && (
+                   <Tag color="orange" style={{ marginLeft: 8 }}>部分成功</Tag>
+                 )}
+                </span>
+              </Tooltip>
+            );
+          }
+         return <span>{progressData.stageProgress || `${progressData.completed}/${progressData.total}`}</span>;
       }
     },
     {
       title: '操作',
       key: 'action',
+      width: 200,
       render: (_, record) => (
-        <Space>
-          {record.status === 'completed' ? (
+        <Space wrap>
+          {record.status === 'completed' || record.error ? (
             <>
-              <Button type="link" onClick={() => viewResults(record.task_id)}>
+              <Button 
+                type="link" 
+                icon={<AreaChartOutlined />}
+                onClick={() => window.open('/test-results/' + record.task_id, '_blank')}
+              >
                 查看結果
               </Button>
               <Button 
                 type="link" 
                 icon={<DownloadOutlined />}
-                onClick={() => window.open(`http://localhost:8000/api/benchmark/download-results/${record.task_id}`)}
+                onClick={() => window.open('http://localhost:8000/api/benchmark/download-results/' + record.task_id)}
               >
-                下載結果
-              </Button>
-              <Button 
-                type="link" 
-                onClick={() => window.open(`http://localhost:8000/api/benchmark/download-performance-analysis/${record.task_id}`)}
-              >
-                下載分析數據
+                下載完整結果
               </Button>
             </>
           ) : record.status === 'processing' || record.status === 'pending' ? (
@@ -735,7 +818,7 @@ const BenchmarkPage = () => {
       if (!detail) return;
       
       Modal.info({
-        title: `組合詳細結果 (批次: ${detail.batch_size}, 精度: ${detail.precision})`,
+        title: '組合詳細結果 (批次: ' + detail.batch_size + ', 精度: ' + detail.precision + ')',
         width: 800,
         content: (
           <div>
@@ -900,11 +983,11 @@ const BenchmarkPage = () => {
             <Col span={8}>
               <Statistic 
                 title="進度" 
-                value={`${taskStatus.completed_combinations}/${taskStatus.total_combinations}`} 
+                value={progressData.stageProgress || `${progressData.completed}/${progressData.total}`}
                 valueStyle={{ fontSize: '14px' }} 
                 suffix={
                   <Progress 
-                    percent={Math.round((taskStatus.completed_combinations / taskStatus.total_combinations) * 100)} 
+                    percent={progressData.percent} 
                     size="small" 
                     status={
                       taskStatus.status === 'processing' ? 'active' :
@@ -936,146 +1019,8 @@ const BenchmarkPage = () => {
               
               {/* 動態顯示組合詳細結果 */}
               {taskStatus.current_combination_index >= 0 && (
-                <div style={{ marginTop: 16, minHeight: '200px' }}>
-                  <Divider orientation="left">
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <span>實時測試結果</span>
-                      {taskStatus.current_step !== 'conversion' && (
-                        <Button 
-                          size="small" 
-                          type="primary" 
-                          onClick={() => fetchCombinationDetail(taskStatus.task_id, taskStatus.current_combination_index)}
-                          loading={loadingCombinations[`${taskStatus.task_id}_${taskStatus.current_combination_index}`]}
-                          icon={<SyncOutlined />}
-                          style={{ marginLeft: 8 }}
-                        >
-                          刷新結果
-                        </Button>
-                      )}
-                    </div>
-                  </Divider>
-                  
-                  {/* 轉換階段的提示 */}
-                  {taskStatus.current_step === 'conversion' ? (
-                    <div style={{ textAlign: 'center', padding: '40px', color: '#999' }}>
-                      <SyncOutlined spin style={{ fontSize: '24px', marginBottom: '10px' }} />
-                      <div>模型轉換中，請稍候...</div>
-                    </div>
-                  ) : (
-                    <>
-                      {/* 載入中提示 */}
-                      {loadingCombinations[`${taskStatus.task_id}_${taskStatus.current_combination_index}`] && (
-                        <div style={{ textAlign: 'center', padding: '40px' }}>
-                          <SyncOutlined spin /> 載入測試結果...
-                        </div>
-                      )}
-                      
-                      {/* 顯示測試結果 */}
-                      {(() => {
-                        const detail = combinationDetails[`${taskStatus.task_id}_${taskStatus.current_combination_index}`];
-                        
-                        if (!detail && !loadingCombinations[`${taskStatus.task_id}_${taskStatus.current_combination_index}`]) {
-                          return (
-                            <div style={{ textAlign: 'center', padding: '40px', color: '#999' }}>
-                              等待測試結果...
-                            </div>
-                          );
-                        }
-                        
-                        if (!detail) return null;
-                        
-                        return (
-                          <div>
-                            {/* 驗證結果 */}
-                            {detail.validation.status === 'completed' && detail.validation.results && (
-                              <Card size="small" title="模型驗證結果" style={{ marginBottom: 10 }}>
-                                {detail.validation.results.metrics ? (
-                                  <Row gutter={16}>
-                                    <Col span={6}>
-                                      <Statistic title="精確度 (Precision)" value={Number(detail.validation.results.metrics.precision || 0).toFixed(4)} />
-                                    </Col>
-                                    <Col span={6}>
-                                      <Statistic title="召回率 (Recall)" value={Number(detail.validation.results.metrics.recall || 0).toFixed(4)} />
-                                    </Col>
-                                    <Col span={6}>
-                                      <Statistic title="mAP@0.5" value={Number(detail.validation.results.metrics.mAP50 || 0).toFixed(4)} />
-                                    </Col>
-                                    <Col span={6}>
-                                      <Statistic title="mAP@0.5:0.95" value={Number(detail.validation.results.metrics.mAP50_95 || 0).toFixed(4)} />
-                                    </Col>
-                                  </Row>
-                                ) : (
-                                  <Empty description="無可用的驗證指標數據" />
-                                )}
-                              </Card>
-                            )}
-                            
-                            {/* 驗證錯誤 */}
-                            {detail.validation.status === 'failed' && detail.validation.error && (
-                              <Alert 
-                                type="error" 
-                                message="模型驗證失敗" 
-                                description={detail.validation.error}
-                                style={{ marginBottom: 10 }}
-                                showIcon
-                              />
-                            )}
-                            
-                            {/* 推論測試結果 */}
-                            {detail.inference.status === 'completed' && detail.inference.results && (
-                              <Card size="small" title="推論測試結果" style={{ marginBottom: 10 }}>
-                                {detail.inference.results.avg_inference_time_ms ? (
-                                  <Row gutter={16}>
-                                    <Col span={6}>
-                                      <Statistic 
-                                        title="平均推理時間" 
-                                        value={Number(detail.inference.results.avg_inference_time_ms || 0).toFixed(2)} 
-                                        suffix="ms" 
-                                      />
-                                    </Col>
-                                    <Col span={6}>
-                                      <Statistic 
-                                        title="吞吐量" 
-                                        value={Number(detail.inference.results.throughput_fps || 0).toFixed(2)} 
-                                        suffix="FPS" 
-                                      />
-                                    </Col>
-                                    <Col span={6}>
-                                      <Statistic 
-                                        title="內存使用" 
-                                        value={Number(detail.inference.results.memory_usage_mb || 0).toFixed(2)} 
-                                        suffix="MB" 
-                                      />
-                                    </Col>
-                                    <Col span={6}>
-                                      <Statistic 
-                                        title="GPU使用率" 
-                                        value={Number(detail.inference.results.avg_gpu_load || 0).toFixed(2)} 
-                                        suffix="%" 
-                                      />
-                                    </Col>
-                                  </Row>
-                                ) : (
-                                  <Empty description="無可用的推論測試數據" />
-                                )}
-                              </Card>
-                            )}
-                            
-                            {/* 推論測試錯誤 */}
-                            {detail.inference.status === 'failed' && detail.inference.error && (
-                              <Alert 
-                                type="error" 
-                                message="推論測試失敗" 
-                                description={detail.inference.error} 
-                                style={{ marginBottom: 10 }}
-                                showIcon
-                              />
-                            )}
-                          </div>
-                        );
-                      })()}
-                    </>
-                  )}
+                <div style={{ marginTop: 16 }}>
+                  {/* 實時測試結果部分已移除 */}
                 </div>
               )}
             </div>
@@ -1391,8 +1336,6 @@ const BenchmarkPage = () => {
           </div>
         )}
       </Modal>
-      
-      {/* 數據集管理模態框 (可選，如果需要單獨的管理界面) */}
     </div>
   );
 };

@@ -128,16 +128,16 @@ const ConversionPage = () => {
       if (!sourceModel) return false;
 
       // 建構潛在的目標模型名稱 (與後端邏輯相同)
-      const safeName = sourceModel.name.replace(" ", "_").replace("/", "_").replace("\\", "_");
+      const safeName = sourceModel.name.replace(/[ /\\]/g, "_");
       const batchSize = parseInt(values.batch_size);
       const imgSize = parseInt(values.image_size);
       
-
-      let targetModelName;
+      // 使用源模型ID的前8位
+      const sourceIdShort = sourceModel.id.substring(0, 8);
       const paramSuffix = `_${values.target_format}_${values.precision}`;
       const batchSizeSuffix = `_batch${batchSize}`;
       const imgSizeSuffix = `_size${imgSize}`;
-      targetModelName = `${safeName}${paramSuffix}${batchSizeSuffix}${imgSizeSuffix}`;
+      const targetModelName = `${safeName}_${sourceIdShort}${paramSuffix}${batchSizeSuffix}${imgSizeSuffix}`;
 
       
       // 檢查是否存在此名稱的模型

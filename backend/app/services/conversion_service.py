@@ -6,7 +6,7 @@ import subprocess
 from typing import List, Dict, Optional, Any
 from datetime import datetime, timezone, timedelta
 
-from app.models import ConversionJob, ConversionStatus, ModelFormat, PrecisionType, ModelInfo
+from app.models import ConversionJob, ConversionStatus, ModelFormat, PrecisionType, ModelInfo, ModelType
 from app.services.model_service import ModelService
 
 class ConversionService:
@@ -24,6 +24,17 @@ class ConversionService:
         
         # 載入已有任務數據
         self._load_jobs()
+    
+    def _get_task_from_model_type(self, model_type: ModelType) -> str:
+        """根據模型類型確定YOLO task參數"""
+        if model_type == ModelType.YOLOV8_POSE:
+            return "pose"
+        elif model_type == ModelType.YOLOV8_SEG:
+            return "segment"
+        elif model_type == ModelType.YOLOV8:
+            return "detect"
+        else:
+            return "detect"  # 默認為檢測任務
     
     def get_jobs(self, status: Optional[ConversionStatus] = None, 
                  skip: int = 0, limit: int = 10) -> List[ConversionJob]:
@@ -208,16 +219,10 @@ class ConversionService:
         if parameters.get("imgsz"):
             param_suffix += f"_size{parameters.get('imgsz')}"
         
-        # 創建目標目錄（固定使用test_engine_fp32_batch1_size640目錄或根據參數生成）
-        # 判斷參數 - 如果是engine格式，fp32精度，batch_size=1，size=640，則使用固定名稱
-        if (target_format == ModelFormat.ENGINE and 
-            precision == PrecisionType.FP32 and 
-            parameters.get("batch_size") == 1 and 
-            parameters.get("imgsz") == 640):
-            target_model_name = "test_engine_fp32_batch1_size640"
-        else:
-            # 否則使用原來的命名方式
-            target_model_name = f"{safe_name}{param_suffix}"
+        # 創建目標目錄，確保包含源模型ID以避免命名衝突
+        # 使用源模型ID的前8位作為唯一標識符
+        source_id_short = source_model.id[:8]
+        target_model_name = f"{safe_name}_{source_id_short}{param_suffix}"
             
         target_dir = os.path.join("model_repository", target_model_name)
         
@@ -342,11 +347,13 @@ instance_group [
             import sys
             import shutil
             import json
+            import torch
             from ultralytics import YOLO
             
-            # 載入模型
+            # 載入模型，設置task
             print(f"載入模型文件: {source_model.path}")
-            model = YOLO(source_model.path)
+            task = self._get_task_from_model_type(source_model.type)
+            model = YOLO(source_model.path, task=task)
             
             # 設置導出參數
             imgsz = parameters.get("imgsz", 640)
@@ -361,6 +368,7 @@ instance_group [
                 "simplify": True,
                 "opset": opset,
                 "dynamic": dynamic,
+                "device": 0 if torch.cuda.is_available() else "cpu",
             }
             
             print(f"ONNX導出參數: {export_params}")
@@ -489,11 +497,13 @@ instance_group [
             import os
             import shutil
             import json
+            import torch
             from ultralytics import YOLO
             
-            # 載入模型
+            # 載入模型，設置task
             print(f"載入模型文件: {source_model.path}")
-            model = YOLO(source_model.path)
+            task = self._get_task_from_model_type(source_model.type)
+            model = YOLO(source_model.path, task=task)
             
             # 設置導出參數
             imgsz = parameters.get("imgsz", 640)
@@ -509,6 +519,7 @@ instance_group [
                 "batch": batch,      # 明確設置batch參數
                 "workspace": workspace,
                 "simplify": True,
+                "device": 0 if torch.cuda.is_available() else "cpu",
             }
             
             print(f"TensorRT導出參數: {export_params}")
