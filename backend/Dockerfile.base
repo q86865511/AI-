@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.0.1-base-ubuntu22.04
+FROM nvcr.io/nvidia/tensorrt:23.04-py3
 
 # 安裝基本依賴
 RUN apt-get update && apt-get install -y \
@@ -24,7 +24,7 @@ WORKDIR /app
 COPY requirements.txt .
 
 # 安裝Python依賴
-RUN pip3 install torch==2.3.0 torchvision==0.18.0 torchaudio==2.3.0 --index-url https://download.pytorch.org/whl/cu118
+RUN pip3 install torch==2.3.0 torchvision==0.18.0 torchaudio==2.3.0 --index-url https://download.pytorch.org/whl/cu121
 RUN pip3 install --no-cache-dir -r requirements.txt 
 
 # 設置PyCUDA環境變數

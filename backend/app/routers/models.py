@@ -20,13 +20,18 @@ async def list_models(
     model_type: Optional[ModelType] = None,
     format: Optional[ModelFormat] = None,
     skip: int = Query(0, ge=0),
-    limit: int = Query(10, ge=1, le=100)
+    limit: int = Query(100, ge=1, le=1000)
 ):
     """
     獲取模型列表，可按類型和格式過濾
     """
+    # 先獲取所有模型來計算總數
+    all_models = model_service.get_models(model_type, format, 0, 1000)  # 獲取所有模型計算總數
+    total_count = len(all_models)
+    
+    # 再獲取分頁數據
     models = model_service.get_models(model_type, format, skip, limit)
-    return {"models": models, "total": len(models)}
+    return {"models": models, "total": total_count}
 
 @router.get("/refresh")
 async def refresh_models():

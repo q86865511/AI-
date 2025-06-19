@@ -1,6 +1,14 @@
 import React, { useState, useEffect } from 'react';
-import { Table, Button, Upload, Form, Input, Select, Modal, Card, message, Tooltip } from 'antd';
-import { UploadOutlined, PlusOutlined, InfoCircleOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Table, Button, Upload, Form, Input, Select, Modal, Card, message, Tooltip, Badge, Space, Tag } from 'antd';
+import { 
+  UploadOutlined, 
+  PlusOutlined, 
+  InfoCircleOutlined, 
+  ReloadOutlined,
+  CloudUploadOutlined,
+  CloudDownloadOutlined,
+  LoadingOutlined
+} from '@ant-design/icons';
 import axios from 'axios';
 
 const { Option } = Select;
@@ -10,6 +18,8 @@ const ModelsPage = () => {
   const [loading, setLoading] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
   const [uploadForm] = Form.useForm();
+  const [loadingModels, setLoadingModels] = useState(new Set()); // 跟踪正在掛載/卸載的模型
+  const [uploading, setUploading] = useState(false);
 
   // 當組件掛載時和每次訪問頁面時刷新模型列表
   useEffect(() => {
@@ -82,8 +92,29 @@ const ModelsPage = () => {
       // 按創建時間排序
       filteredModels.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
       
+      // 檢查Triton兼容模型的掛載狀態
+      const modelsWithStatus = await Promise.all(
+        filteredModels.map(async (model) => {
+          if (model.metadata && model.metadata.triton_model_name && model.metadata.is_trt_model) {
+            try {
+              const statusResponse = await axios.get(`http://localhost:8000/api/triton/models/${model.id}/status`);
+              return {
+                ...model,
+                tritonStatus: statusResponse.data
+              };
+            } catch (error) {
+              return {
+                ...model,
+                tritonStatus: { loaded: false, ready: false, error: error.message }
+              };
+            }
+          }
+          return model;
+        })
+      );
+      
       console.log(`從 ${rawModels.length} 個模型中過濾出 ${filteredModels.length} 個不重複模型`);
-      setModels(filteredModels);
+      setModels(modelsWithStatus);
     } catch (error) {
       console.error('獲取模型失敗:', error);
       message.error('獲取模型列表失敗');
@@ -104,9 +135,9 @@ const ModelsPage = () => {
   };
 
   const handleUpload = async (values) => {
+    const { name, model_type, description, fileList } = values;
+    
     try {
-      const { fileList, name, model_type, description } = values;
-      
       console.log('提交的模型類型:', model_type);
       console.log('提交的文件:', fileList);
       
@@ -114,6 +145,12 @@ const ModelsPage = () => {
         message.error('請選擇有效的模型文件');
         return;
       }
+      
+      // 設置loading狀態
+      setUploading(true);
+      
+      // 顯示開始上傳的消息
+      const uploadMessage = message.loading('正在上傳模型文件...', 0);
       
       const formData = new FormData();
       formData.append('model_file', fileList[0].originFileObj);
@@ -128,13 +165,37 @@ const ModelsPage = () => {
         console.log(pair[0] + ': ' + (pair[0] === 'model_file' ? '文件對象' : pair[1]));
       }
       
+      try {
+        // 更新loading消息
+        uploadMessage();
+        const processingMessage = message.loading('正在處理模型文件...', 0);
+        
+        // 如果是.pt文件，顯示TorchScript轉換消息
+        const filename = fileList[0].originFileObj.name;
+        if (filename.endsWith('.pt')) {
+          processingMessage();
+          const torchscriptMessage = message.loading('正在轉換PyTorch模型為TorchScript，請稍候...', 0);
+          
+          const response = await axios.post('http://localhost:8000/api/models/', formData, {
+            headers: {
+              'Content-Type': 'multipart/form-data',
+            },
+            timeout: 120000, // 2分鐘超時，因為TorchScript轉換需要時間
+          });
+          
+          torchscriptMessage();
+        } else {
       const response = await axios.post('http://localhost:8000/api/models/', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
+            timeout: 60000, // 1分鐘超時
       });
       
-      message.success('上傳模型成功');
+          processingMessage();
+        }
+        
+        message.success('模型上傳並處理完成！');
       setModalVisible(false);
       uploadForm.resetFields();
       
@@ -142,9 +203,129 @@ const ModelsPage = () => {
       setTimeout(() => {
         fetchModels();
       }, 1000);
+        
+      } catch (requestError) {
+        throw requestError;
+      }
+      
     } catch (error) {
       console.error('上傳模型失敗:', error.response?.data || error);
-      message.error(`上傳模型失敗: ${error.response?.data?.detail || error.message}`);
+      
+      // 根據錯誤類型提供更詳細的錯誤信息
+      let errorMessage = '上傳模型失敗';
+      if (error.code === 'ECONNABORTED') {
+        errorMessage = '上傳超時，請檢查文件大小或網路連接';
+      } else if (error.response?.data?.detail) {
+        errorMessage = `上傳失敗: ${error.response.data.detail}`;
+      } else if (error.message) {
+        errorMessage = `上傳失敗: ${error.message}`;
+      }
+      
+      message.error(errorMessage);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  // 掛載模型到Triton
+  const handleLoadModel = async (modelId, modelName) => {
+    setLoadingModels(prev => new Set([...prev, modelId]));
+    try {
+      const response = await axios.post(`http://localhost:8000/api/triton/models/${modelId}/load`);
+      if (response.data.success) {
+        message.success(`模型 ${modelName} 掛載成功`);
+        // 刷新模型狀態
+        await fetchModels();
+      } else {
+        message.error(`掛載模型失敗: ${response.data.error}`);
+      }
+    } catch (error) {
+      console.error('掛載模型失敗:', error);
+      message.error(`掛載模型失敗: ${error.response?.data?.detail || error.message}`);
+    } finally {
+      setLoadingModels(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(modelId);
+        return newSet;
+      });
+    }
+  };
+
+  // 從Triton卸載模型
+  const handleUnloadModel = async (modelId, modelName) => {
+    setLoadingModels(prev => new Set([...prev, modelId]));
+    try {
+      const response = await axios.post(`http://localhost:8000/api/triton/models/${modelId}/unload`);
+      if (response.data.success) {
+        message.success(`模型 ${modelName} 卸載成功`);
+        // 刷新模型狀態
+        await fetchModels();
+      } else {
+        message.error(`卸載模型失敗: ${response.data.error}`);
+      }
+    } catch (error) {
+      console.error('卸載模型失敗:', error);
+      message.error(`卸載模型失敗: ${error.response?.data?.detail || error.message}`);
+    } finally {
+      setLoadingModels(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(modelId);
+        return newSet;
+      });
+    }
+  };
+
+  // 渲染Triton狀態
+  const renderTritonStatus = (record) => {
+    if (!record.metadata || !record.metadata.is_trt_model) {
+      return <Tag color="default">非Triton模型</Tag>;
+    }
+
+    if (!record.tritonStatus) {
+      return <Tag color="processing">檢查中...</Tag>;
+    }
+
+    if (record.tritonStatus.loaded && record.tritonStatus.ready) {
+      return <Badge status="success" text="已掛載" />;
+    } else {
+      return <Badge status="default" text="未掛載" />;
+    }
+  };
+
+  // 渲染Triton操作按鈕
+  const renderTritonActions = (record) => {
+    if (!record.metadata || !record.metadata.is_trt_model) {
+      return null;
+    }
+
+    const isLoading = loadingModels.has(record.id);
+    const isLoaded = record.tritonStatus && record.tritonStatus.loaded;
+
+    if (isLoaded) {
+      return (
+        <Button
+          type="link"
+          danger
+          size="small"
+          icon={isLoading ? <LoadingOutlined /> : <CloudDownloadOutlined />}
+          loading={isLoading}
+          onClick={() => handleUnloadModel(record.id, record.name)}
+        >
+          卸載
+        </Button>
+      );
+    } else {
+      return (
+        <Button
+          type="link"
+          size="small"
+          icon={isLoading ? <LoadingOutlined /> : <CloudUploadOutlined />}
+          loading={isLoading}
+          onClick={() => handleLoadModel(record.id, record.name)}
+        >
+          掛載
+        </Button>
+      );
     }
   };
 
@@ -154,9 +335,18 @@ const ModelsPage = () => {
       dataIndex: 'name',
       key: 'name',
       render: (text, record) => (
+        <div>
+          <div>
         <Tooltip title={`ID: ${record.id}`}>
           <span>{text} <InfoCircleOutlined style={{ fontSize: '12px', color: '#1890ff' }} /></span>
         </Tooltip>
+          </div>
+          {record.metadata && record.metadata.is_trt_model && (
+            <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+              {renderTritonStatus(record)}
+            </div>
+          )}
+        </div>
       ),
     },
     {
@@ -168,12 +358,24 @@ const ModelsPage = () => {
       title: '格式',
       dataIndex: 'format',
       key: 'format',
+      render: (format, record) => (
+        <div>
+          <Tag color={format === 'engine' ? 'green' : format === 'onnx' ? 'blue' : 'default'}>
+            {format.toUpperCase()}
+          </Tag>
+          {record.metadata && record.metadata.conversion_precision && (
+            <Tag color={record.metadata.conversion_precision === 'fp16' ? 'orange' : 'default'} size="small">
+              {record.metadata.conversion_precision.toUpperCase()}
+            </Tag>
+          )}
+        </div>
+      ),
     },
     {
       title: '大小',
       dataIndex: 'size_mb',
       key: 'size_mb',
-      render: (size) => `${size} MB`,
+      render: (size) => `${size.toFixed(1)} MB`,
     },
     {
       title: '上傳時間',
@@ -185,20 +387,22 @@ const ModelsPage = () => {
       title: '操作',
       key: 'action',
       render: (_, record) => (
-        <>
-          <Button type="link" href={`/models/${record.id}`}>
+        <Space size="small">
+          <Button type="link" size="small" href={`/models/${record.id}`}>
             詳情
           </Button>
           <Button 
             type="link" 
+            size="small"
             onClick={() => window.open(`http://localhost:8000/api/models/${record.id}/download`)}
           >
             下載
           </Button>
-          <Button type="link" danger onClick={() => handleDelete(record.id)}>
+          {renderTritonActions(record)}
+          <Button type="link" danger size="small" onClick={() => handleDelete(record.id)}>
             刪除
           </Button>
-        </>
+        </Space>
       ),
     },
   ];
@@ -208,18 +412,17 @@ const ModelsPage = () => {
       <Card
         title="模型管理"
         extra={
-          <>
+          <Space>
             <Button 
               onClick={fetchModels} 
               icon={<ReloadOutlined />} 
-              style={{ marginRight: 8 }}
             >
               刷新
             </Button>
             <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalVisible(true)}>
               上傳模型
             </Button>
-          </>
+          </Space>
         }
       >
         <Table
@@ -227,6 +430,11 @@ const ModelsPage = () => {
           dataSource={models}
           rowKey="id"
           loading={loading}
+          pagination={{
+            showSizeChanger: true,
+            showQuickJumper: true,
+            showTotal: (total, range) => `第 ${range[0]}-${range[1]} 項，共 ${total} 項`,
+          }}
         />
       </Card>
 
@@ -288,8 +496,13 @@ const ModelsPage = () => {
             <Input.TextArea rows={4} />
           </Form.Item>
           <Form.Item>
-            <Button type="primary" htmlType="submit">
-              上傳
+            <Button 
+              type="primary" 
+              htmlType="submit" 
+              loading={uploading}
+              disabled={uploading}
+            >
+              {uploading ? '處理中...' : '上傳'}
             </Button>
           </Form.Item>
         </Form>

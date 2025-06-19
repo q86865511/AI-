@@ -1,3 +1,4 @@
+version: '3.8'
 services:
   backend-base:
     image: sys-backend-base
@@ -5,10 +6,31 @@ services:
       context: ./backend
       dockerfile: Dockerfile.base
 
+  triton:
+    image: nvcr.io/nvidia/tritonserver:23.04-py3
+    ports:
+      - "8001:8000"  # HTTP API
+      - "8002:8001"  # GRPC API  
+      - "8003:8002"  # Metrics
+    volumes:
+      - ./model_repository:/models
+    command: tritonserver --model-repository=/models --model-control-mode=explicit --allow-http=true --allow-grpc=true --allow-metrics=true --log-verbose=1 --strict-model-config=false --exit-on-error=false
+    mem_limit: 16g
+    shm_size: '8gb'
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
   backend:
     build: 
       context: ./backend
       dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
     volumes:
       - ./backend:/app
       - ./model_repository:/app/model_repository
@@ -26,9 +48,11 @@ services:
     environment:
       - MODEL_REPOSITORY_PATH=/app/model_repository
       - PYTHONUNBUFFERED=1
+      - TRITON_URL=http://triton:8000
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --log-level=debug
     depends_on:
       - backend-base
+      - triton
 
   frontend-base:
     image: sys-frontend-base

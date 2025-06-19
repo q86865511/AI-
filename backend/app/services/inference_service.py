@@ -11,6 +11,7 @@ import asyncio
 import torch
 import gc
 import subprocess
+import shutil
 from app.services.model_service import ModelService
 import tensorrt as trt
 import concurrent.futures
@@ -1054,20 +1055,28 @@ class InferenceService:
                 'model_vram_mb': 0.0,
                 'monitoring_duration_s': 0.0
             }
+        finally:
+            # 驗證完成後清理runs目錄
+            self._cleanup_runs_directory()
 
     def _run_yolo_validation(self, model_path: str, model_type: ModelType, yaml_file: str, validation_params: dict) -> dict:
         """在執行緒中運行YOLO驗證（同步操作）"""
         from ultralytics import YOLO
         
+        try:
         task = self._get_task_from_model_type(model_type)
         yolo_model = YOLO(model_path, task=task)
         metrics = yolo_model.val(data=yaml_file, **validation_params)
         return metrics.results_dict
+        finally:
+            # 驗證完成後清理runs目錄
+            self._cleanup_runs_directory()
     
     def _run_yolo_validation_with_source(self, source_path: str, source_type: ModelType, model_path: str, model_format: str, yaml_file: str, validation_params: dict) -> dict:
         """在執行緒中運行轉換模型的YOLO驗證（同步操作）"""
         from ultralytics import YOLO
         
+        try:
         task = self._get_task_from_model_type(source_type)
         yolo_model = YOLO(source_path, task=task)
         
@@ -1081,6 +1090,9 @@ class InferenceService:
         
         metrics = yolo_model.val(data=yaml_file, **validation_params)
         return metrics.results_dict
+        finally:
+            # 驗證完成後清理runs目錄
+            self._cleanup_runs_directory()
     
     def _run_engine_yolo_validation(self, model_path: str, model_type: ModelType, validation_params: dict) -> dict:
         """在執行緒中運行Engine模型的YOLO驗證（同步操作），包含VRAM測量"""
@@ -1114,6 +1126,9 @@ class InferenceService:
                 'model_vram_mb': 0.0,
                 'monitoring_duration_s': 0.0
             }
+        finally:
+            # 驗證完成後清理runs目錄
+            self._cleanup_runs_directory()
 
     def _get_torch_vram_usage(self):
         """
@@ -1295,6 +1310,9 @@ class InferenceService:
             torch.cuda.empty_cache()
             gc.collect()
             print("資源清理完成")
+            
+            # 清理runs目錄
+            self._cleanup_runs_directory()
 
     def _cleanup_gpu_resources(self):
         """清理GPU資源"""
@@ -1650,6 +1668,8 @@ class InferenceService:
             if 'yolo_model' in locals():
                 del yolo_model
             self._cleanup_gpu_resources()
+            # 清理runs目錄
+            self._cleanup_runs_directory()
     
     def _run_general_benchmark(self, model_path: str, model_type: ModelType, test_data_or_image, device, batch_size: int, iterations: int) -> dict:
         """在執行緒中運行一般模型的基準測試（同步操作）"""
@@ -1719,3 +1739,16 @@ class InferenceService:
             if 'yolo_model' in locals():
                 del yolo_model
             self._cleanup_gpu_resources()
+            # 清理runs目錄
+            self._cleanup_runs_directory()
+
+    def _cleanup_runs_directory(self):
+        """清理YOLO生成的runs目錄"""
+        try:
+            runs_dir = os.path.join(os.getcwd(), "runs")
+            if os.path.exists(runs_dir):
+                print(f"清理runs目錄: {runs_dir}")
+                shutil.rmtree(runs_dir)
+                print("runs目錄已清理完成")
+        except Exception as e:
+            print(f"清理runs目錄時出錯: {e}")

@@ -18,6 +18,7 @@ const ConversionPage = () => {
   const [systemStateLoading, setSystemStateLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [duplicateModelWarning, setDuplicateModelWarning] = useState(null);
+  const [selectedModelFormat, setSelectedModelFormat] = useState(null);  // 新增狀態追踪選中的模型格式
 
   useEffect(() => {
     fetchModels();
@@ -204,6 +205,7 @@ const ConversionPage = () => {
       message.success('創建轉換任務成功');
       fetchJobs();
       form.resetFields();
+      setSelectedModelFormat(null);  // 重置選中的模型格式
     } catch (error) {
       console.error('創建轉換任務失敗:', error);
       if (error.response && error.response.data && error.response.data.detail) {
@@ -217,6 +219,20 @@ const ConversionPage = () => {
   };
 
   const handleValuesChange = async (changedValues, allValues) => {
+    // 追踪選中模型的格式
+    if (changedValues.model_id) {
+      const selectedModel = models.find(model => model.id === changedValues.model_id);
+      if (selectedModel) {
+        setSelectedModelFormat(selectedModel.format);
+        // 如果選擇的是 ONNX 模型，自動設定目標格式為 engine
+        if (selectedModel.format === 'onnx') {
+          form.setFieldsValue({
+            target_format: 'engine'
+          });
+        }
+      }
+    }
+    
     // 只有當所有必要字段都有值時才進行檢查
     if (allValues.model_id && 
         allValues.target_format && 
@@ -414,9 +430,19 @@ const ConversionPage = () => {
             label="目標格式"
             rules={[{ required: true, message: '請選擇目標格式' }]}
           >
-            <Select placeholder="選擇目標格式" disabled={systemState && systemState.is_testing}>
+            <Select 
+              placeholder="選擇目標格式" 
+              disabled={systemState && systemState.is_testing}
+            >
+              {/* 如果選中的是 ONNX 模型，只顯示 TensorRT Engine 選項 */}
+              {selectedModelFormat === 'onnx' ? (
+                <Option value="engine">TensorRT Engine (包含 .engine 和 .plan)</Option>
+              ) : (
+                <>
               <Option value="onnx">ONNX</Option>
-              <Option value="engine">TensorRT Engine</Option>
+                  <Option value="engine">TensorRT Engine (包含 .engine 和 .plan)</Option>
+                </>
+              )}
             </Select>
           </Form.Item>
           <Form.Item

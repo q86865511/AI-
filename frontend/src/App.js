@@ -8,7 +8,8 @@ import {
   DashboardOutlined,
   FundViewOutlined,
   BarChartOutlined,
-  FileSearchOutlined
+  FileSearchOutlined,
+  MonitorOutlined
 } from '@ant-design/icons';
 import './App.css';
 
@@ -19,6 +20,7 @@ import ConversionPage from './pages/ConversionPage';
 import BenchmarkPage from './pages/BenchmarkPage';
 import PerformanceAnalyzerPage from './pages/PerformanceAnalyzerPage';
 import TestResultsPage from './pages/TestResultsPage';
+import DeploymentMonitorPage from './pages/DeploymentMonitorPage';
 
 const { Header, Sider, Content, Footer } = Layout;
 const { Title } = Typography;
@@ -43,6 +45,8 @@ function App() {
       setSelectedKeys(['5']);
     } else if (pathname.startsWith('/performance')) {
       setSelectedKeys(['6']);
+    } else if (pathname.startsWith('/deployment-monitor')) {
+      setSelectedKeys(['7']);
     }
   }, [location.pathname]);
 
@@ -98,6 +102,11 @@ function App() {
                   key: '6',
                   icon: <BarChartOutlined />,
                   label: <Link to="/performance-analyzer">自動化結果分析</Link>,
+                },
+                {
+                  key: '7',
+                  icon: <MonitorOutlined />,
+                  label: <Link to="/deployment-monitor">部署平台監控</Link>,
                 }
               ]}
             />
@@ -125,6 +134,7 @@ function App() {
                   <Route path="/performance/:taskId" element={<PerformanceAnalyzerPage />} />
                   <Route path="/test-results" element={<TestResultsPage />} />
                   <Route path="/test-results/:taskId" element={<TestResultsPage />} />
+                  <Route path="/deployment-monitor" element={<DeploymentMonitorPage />} />
                 </Routes>
               </div>
             </Content>

@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import os
 
-from app.routers import models, conversion, inference, benchmark
+from app.routers import models, conversion, inference, benchmark, triton
 
 # 創建FastAPI應用
 app = FastAPI(
@@ -32,6 +32,7 @@ app.include_router(models.router, prefix="/api/models", tags=["模型管理"])
 app.include_router(conversion.router, prefix="/api/conversion", tags=["模型轉換"])
 app.include_router(inference.router, prefix="/api/inference", tags=["模型推理"])
 app.include_router(benchmark.router, prefix="/api/benchmark", tags=["性能基準測試"])
+app.include_router(triton.router, prefix="/api/triton", tags=["Triton服務器管理"])
 
 # 根路由
 @app.get("/", tags=["健康檢查"])

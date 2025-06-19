@@ -269,6 +269,8 @@ class ConversionService:
             platform = "onnxruntime_onnx"
         elif target_format == ModelFormat.ENGINE:
             platform = "tensorrt_plan"
+            # 對於 TensorRT Engine，使用 .plan 檔案
+            model_filename = "model.plan"
         
         # 獲取輸入圖像尺寸
         img_size = parameters.get("imgsz", 640)
@@ -277,16 +279,19 @@ class ConversionService:
         # 根據模型類型設置不同的輸出維度
         output_dims = "[ 84, 8400 ]"  # 默認為YOLOv8檢測模型
         if source_model.type.value == "yolov8_seg":
-            # 分割模型有不同的輸出
-            output_dims = "[ -1, -1, -1 ]"  # 使用動態維度
+            # 分割模型有不同的輸出 - 實際輸出是 [batch, 56, anchors]
+            # 當max_batch_size > 0時，Triton會自動添加batch維度
+            # 所以配置中只需要指定 [56, anchors] 兩個維度
+            output_dims = "[ 56, -1 ]"  # 第一維固定56，第二維動態
         elif source_model.type.value == "yolov8_pose":
-            # 姿態估計模型有不同的輸出
-            output_dims = "[ -1, -1, -1 ]"  # 使用動態維度
+            # 姿態估計模型有不同的輸出 - 實際輸出是 [batch, pose_dim, anchors]
+            # 配置中只需要指定非batch維度
+            output_dims = "[ 56, -1 ]"  # 兩個動態維度
         
-        # 生成基本配置
+        # 生成基本配置 - max_batch_size 設定為原始 batch 大小
         config_content = f"""name: "{target_model_name}"
 platform: "{platform}"
-max_batch_size: {batch_size * 2}  # 允許的最大批次大小是設定值的兩倍
+max_batch_size: {batch_size}
 input [
   {{
     name: "images"
@@ -313,6 +318,7 @@ instance_group [
             config_file.write(config_content)
         
         print(f"創建Triton配置文件: {config_path}")
+        print(f"平台: {platform}, 模型檔案: {model_filename}, max_batch_size: {batch_size}")
         print(f"配置內容: \n{config_content}")
         
         # 創建元數據文件，包含原始模型ID，以便後續能找到關聯
@@ -408,12 +414,16 @@ instance_group [
     
     def _convert_onnx_to_tensorrt(self, onnx_path: str, target_dir: str,
                                precision: PrecisionType, parameters: Dict[str, Any]) -> str:
-        """將ONNX模型轉換為TensorRT格式"""
+        """將ONNX模型轉換為TensorRT格式 - 使用trtexec生成.engine和.plan檔案"""
         print(f"開始將 {onnx_path} 轉換為TensorRT格式...")
+        print(f"目標目錄: {target_dir}")
         
         try:
+            import subprocess
+            
             # 設置TensorRT轉換參數
-            target_path = os.path.join(target_dir, "model.engine")
+            target_engine_path = os.path.join(target_dir, "model.engine")
+            target_plan_path = os.path.join(target_dir, "model.plan")
             
             # 確保目標目錄存在
             os.makedirs(target_dir, exist_ok=True)
@@ -434,15 +444,232 @@ instance_group [
             opt_size = parameters.get("opt_size", 640) 
             max_size = parameters.get("max_size", 1280)
             
-            cmd = [
+            # 第一步：使用trtexec生成 .engine 檔案
+            print("第一步：使用trtexec生成 .engine 檔案...")
+            
+            cmd_engine = [
                 "trtexec", 
                 f"--onnx={onnx_path}",
-                f"--saveEngine={target_path}",
+                f"--saveEngine={target_engine_path}",
                 precision_flag,
                 f"--workspace={workspace*1024}",
                 f"--minShapes=images:1x3x{min_size}x{min_size}",
                 f"--optShapes=images:{batch_size}x3x{opt_size}x{opt_size}",
-                f"--maxShapes=images:{batch_size*2}x3x{max_size}x{max_size}"
+                f"--maxShapes=images:{batch_size}x3x{max_size}x{max_size}"
+            ]
+            
+            # 過濾掉空參數
+            cmd_engine = [c for c in cmd_engine if c]
+            
+            print(f"執行TensorRT轉換命令（生成.engine）: {' '.join(cmd_engine)}")
+            
+            # 執行命令
+            process = subprocess.Popen(
+                cmd_engine, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE
+            )
+            stdout, stderr = process.communicate()
+            
+            stdout_str = stdout.decode('utf-8')
+            stderr_str = stderr.decode('utf-8')
+            
+            print(f"TensorRT轉換輸出（生成.engine）: {stdout_str}")
+            
+            if stderr_str:
+                print(f"TensorRT轉換錯誤（生成.engine）: {stderr_str}")
+            
+            if process.returncode != 0:
+                raise Exception(f"TensorRT轉換失敗（生成.engine），錯誤代碼: {process.returncode}, 錯誤信息: {stderr_str}")
+            
+            # 檢查 .engine 文件是否成功生成
+            if os.path.exists(target_engine_path):
+                file_size = os.path.getsize(target_engine_path)
+                print(f".engine 檔案大小: {file_size / (1024*1024):.2f} MB")
+            else:
+                raise Exception(f".engine 檔案不存在: {target_engine_path}")
+            
+            # 第二步：使用trtexec生成 .plan 檔案
+            print("第二步：使用trtexec生成 .plan 檔案...")
+            
+            cmd_plan = [
+                "trtexec", 
+                f"--onnx={onnx_path}",
+                f"--saveEngine={target_plan_path}",
+                precision_flag,
+                f"--workspace={workspace*1024}",
+                f"--minShapes=images:1x3x{min_size}x{min_size}",
+                f"--optShapes=images:{batch_size}x3x{opt_size}x{opt_size}",
+                f"--maxShapes=images:{batch_size}x3x{max_size}x{max_size}"
+            ]
+            
+            # 過濾掉空參數
+            cmd_plan = [c for c in cmd_plan if c]
+            
+            print(f"執行TensorRT轉換命令（生成.plan）: {' '.join(cmd_plan)}")
+            
+            # 執行命令
+            process = subprocess.Popen(
+                cmd_plan, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE
+            )
+            stdout, stderr = process.communicate()
+            
+            stdout_str = stdout.decode('utf-8')
+            stderr_str = stderr.decode('utf-8')
+            
+            print(f"TensorRT轉換輸出（生成.plan）: {stdout_str}")
+            
+            if stderr_str:
+                print(f"TensorRT轉換錯誤（生成.plan）: {stderr_str}")
+            
+            if process.returncode != 0:
+                raise Exception(f"TensorRT轉換失敗（生成.plan），錯誤代碼: {process.returncode}, 錯誤信息: {stderr_str}")
+            
+            # 檢查 .plan 文件是否成功生成
+            if os.path.exists(target_plan_path):
+                file_size = os.path.getsize(target_plan_path)
+                print(f".plan 檔案大小: {file_size / (1024*1024):.2f} MB")
+            else:
+                raise Exception(f".plan 檔案不存在: {target_plan_path}")
+            
+            print(f"ONNX轉TensorRT完成：")
+            print(f"  - .engine 檔案（用trtexec生成，用於驗證和測試）: {target_engine_path}")
+            print(f"  - .plan 檔案（用trtexec生成，用於 Triton 部署）: {target_plan_path}")
+            
+            # 返回 .engine 文件路徑（保持向後相容性）
+            return target_engine_path
+            
+        except Exception as e:
+            error_msg = f"ONNX轉TensorRT失敗: {str(e)}"
+            print(error_msg)
+            import traceback
+            print(traceback.format_exc())
+            raise Exception(error_msg)
+    
+    def _convert_pt_to_tensorrt(self, source_model: ModelInfo, target_dir: str,
+                              precision: PrecisionType, parameters: Dict[str, Any]) -> str:
+        """將PyTorch模型轉換為TensorRT格式 - 使用yolo.export生成.engine + trtexec生成.plan"""
+        print(f"開始將 {source_model.path} 轉換為TensorRT格式（yolo.export + trtexec流程）...")
+        print(f"目標目錄: {target_dir}")
+        
+        try:
+            import sys
+            import os
+            import shutil
+            import json
+            import torch
+            import subprocess
+            from ultralytics import YOLO
+            
+            # 載入模型，設置task
+            print(f"載入模型文件: {source_model.path}")
+            task = self._get_task_from_model_type(source_model.type)
+            model = YOLO(source_model.path, task=task)
+            
+            # 設置導出參數
+            imgsz = parameters.get("imgsz", 640)
+            half = precision == PrecisionType.FP16
+            workspace = parameters.get("workspace", 4)  # GB
+            batch = parameters.get("batch_size", 1)
+            
+            # 確保目標目錄存在
+            os.makedirs(target_dir, exist_ok=True)
+            
+            # 第一步：使用 YOLO export 直接生成 .engine 檔案
+            print("第一步：執行 YOLO export (.pt -> .engine)...")
+            
+            # 設置導出參數
+            export_params = {
+                "format": "engine",  # 直接導出為TensorRT引擎
+                "imgsz": imgsz,
+                "half": half,
+                "batch": batch,      # 明確設置batch參數
+                "workspace": workspace,
+                "simplify": True,
+                "device": 0 if torch.cuda.is_available() else "cpu",
+            }
+            
+            print(f"TensorRT導出參數: {export_params}")
+            
+            # 執行導出
+            model.export(**export_params)
+  
+            # 獲取源模型目錄作為引擎文件的查找位置
+            source_model_dir = os.path.dirname(source_model.path)
+            engine_path = os.path.join(source_model_dir, "model.engine")  
+            
+            # 移動引擎文件到目標目錄
+            target_engine_path = os.path.join(target_dir, "model.engine")
+            print(f"將引擎文件從 {engine_path} 移動到 {target_engine_path}")      
+            shutil.move(engine_path, target_engine_path)
+            
+            # 檢查 .engine 文件是否成功生成
+            if os.path.exists(target_engine_path):
+                file_size = os.path.getsize(target_engine_path)
+                print(f"引擎文件大小: {file_size / (1024*1024):.2f} MB")
+            else:
+                raise Exception(f"引擎文件不存在: {target_engine_path}")
+            
+            # 第二步：生成 ONNX 然後用 trtexec 生成 .plan 檔案
+            print("第二步：執行 YOLO export (.pt -> .onnx) + trtexec (.onnx -> .plan)...")
+            
+            # 重新載入模型進行ONNX轉換
+            model = YOLO(source_model.path, task=task)
+            
+            # 設置ONNX導出參數
+            onnx_export_params = {
+                "format": "onnx",
+                "imgsz": imgsz,
+                "half": half,
+                "simplify": True,
+                "opset": 12,
+                "dynamic": True,
+                "device": 0 if torch.cuda.is_available() else "cpu",
+            }
+            
+            print(f"ONNX導出參數: {onnx_export_params}")
+            
+            # 執行ONNX導出
+            model.export(**onnx_export_params)
+            
+            # 獲取ONNX文件路徑
+            onnx_path = os.path.join(source_model_dir, "model.onnx")
+            temp_onnx_path = os.path.join(target_dir, "temp_model.onnx")
+            
+            # 複製ONNX文件到目標目錄（暫時使用）
+            print(f"複製ONNX文件從 {onnx_path} 到 {temp_onnx_path}")
+            shutil.copy2(onnx_path, temp_onnx_path)
+            
+            # 檢查ONNX文件是否存在
+            if not os.path.exists(temp_onnx_path):
+                raise Exception(f"ONNX文件不存在: {temp_onnx_path}")
+            
+            # 使用 trtexec 將 ONNX 轉換為 .plan 檔案
+            print("使用 trtexec 將 ONNX 轉換為 .plan 檔案...")
+            
+            plan_path = os.path.join(target_dir, "model.plan")
+            
+            # 根據精度類型設置trtexec參數
+            precision_flag = ""
+            if precision == PrecisionType.FP16:
+                precision_flag = "--fp16"
+            
+            # 設置batch size和workspace
+            min_size = parameters.get("min_size", 640)
+            opt_size = parameters.get("opt_size", 640) 
+            max_size = parameters.get("max_size", 1280)
+            
+            cmd = [
+                "trtexec", 
+                f"--onnx={temp_onnx_path}",
+                f"--saveEngine={plan_path}",
+                precision_flag,
+                f"--workspace={workspace*1024}",
+                f"--minShapes=images:1x3x{min_size}x{min_size}",
+                f"--optShapes=images:{batch}x3x{opt_size}x{opt_size}",
+                f"--maxShapes=images:{batch}x3x{max_size}x{max_size}"
             ]
             
             # 過濾掉空參數
@@ -469,98 +696,30 @@ instance_group [
             if process.returncode != 0:
                 raise Exception(f"TensorRT轉換失敗，錯誤代碼: {process.returncode}, 錯誤信息: {stderr_str}")
             
-            # 檢查文件是否成功生成
-            if os.path.exists(target_path):
-                file_size = os.path.getsize(target_path)
-                print(f"引擎文件大小: {file_size / (1024*1024):.2f} MB")
+            # 檢查 .plan 文件是否成功生成
+            if os.path.exists(plan_path):
+                file_size = os.path.getsize(plan_path)
+                print(f".plan 文件大小: {file_size / (1024*1024):.2f} MB")
             else:
-                raise Exception(f"引擎文件不存在: {target_path}")
+                raise Exception(f".plan 文件不存在: {plan_path}")
             
-            print(f"ONNX模型成功轉換為TensorRT，保存到: {target_path}")
-            return target_path
-            
-        except Exception as e:
-            error_msg = f"ONNX轉TensorRT失敗: {str(e)}"
-            print(error_msg)
-            import traceback
-            print(traceback.format_exc())
-            raise Exception(error_msg)
-    
-    def _convert_pt_to_tensorrt(self, source_model: ModelInfo, target_dir: str,
-                              precision: PrecisionType, parameters: Dict[str, Any]) -> str:
-        """直接將PyTorch模型轉換為TensorRT格式"""
-        print(f"開始將 {source_model.path} 直接轉換為TensorRT格式...")
-        print(f"目標目錄: {target_dir}")
-        
-        try:
-            import sys
-            import os
-            import shutil
-            import json
-            import torch
-            from ultralytics import YOLO
-            
-            # 載入模型，設置task
-            print(f"載入模型文件: {source_model.path}")
-            task = self._get_task_from_model_type(source_model.type)
-            model = YOLO(source_model.path, task=task)
-            
-            # 設置導出參數
-            imgsz = parameters.get("imgsz", 640)
-            half = precision == PrecisionType.FP16
-            workspace = parameters.get("workspace", 4)  # GB
-            batch = parameters.get("batch_size", 1)
-            
-            # 設置導出參數 - 不使用project參數
-            export_params = {
-                "format": "engine",  # 直接導出為TensorRT引擎
-                "imgsz": imgsz,
-                "half": half,
-                "batch": batch,      # 明確設置batch參數
-                "workspace": workspace,
-                "simplify": True,
-                "device": 0 if torch.cuda.is_available() else "cpu",
-            }
-            
-            print(f"TensorRT導出參數: {export_params}")
-            
-            # 執行導出
-            model.export(**export_params)
-  
-            # 獲取源模型目錄作為引擎文件的查找位置
-            source_model_dir = os.path.dirname(source_model.path)
-            engine_path = os.path.join(source_model_dir, "model.engine")  
-
-            # 確保目標目錄存在
-            os.makedirs(target_dir, exist_ok=True)
-            
-            # 移動引擎文件到目標目錄
-            target_path = os.path.join(target_dir, "model.engine")
-
-            print(f"將引擎文件從 {engine_path} 移動到 {target_path}")      
-            shutil.move(engine_path, target_path)
-            
-            # 檢查文件是否成功處理
-            if os.path.exists(target_path):
-                file_size = os.path.getsize(target_path)
-                print(f"引擎文件大小: {file_size / (1024*1024):.2f} MB")
-            else:
-                raise Exception(f"引擎文件不存在: {target_path}")
-            
-            # 清理中間生成的ONNX文件
-            onnx_path = os.path.join(source_model_dir, "model.onnx")
-            if os.path.exists(onnx_path):
-                print(f"刪除中間生成的ONNX文件: {onnx_path}")
-                try:
-                    os.remove(onnx_path)
+            # 清理臨時檔案
+            try:
+                os.remove(temp_onnx_path)
+                os.remove(onnx_path)  # 清理源目錄中的ONNX檔案
+                print(f"清理臨時ONNX文件")
                 except Exception as e:
-                    print(f"無法刪除ONNX文件: {str(e)}")
+                print(f"清理ONNX文件時出錯: {str(e)}")
             
-            print(f"PyTorch模型成功轉換為TensorRT引擎，保存到: {target_path}")
-            return target_path
+            print(f"轉換流程完成：")
+            print(f"  - .engine 檔案（用YOLO export生成，用於驗證和測試）: {target_engine_path}")
+            print(f"  - .plan 檔案（用trtexec生成，用於 Triton 部署）: {plan_path}")
+            
+            # 返回 .engine 文件路徑（保持向後相容性）
+            return target_engine_path
         
         except Exception as e:
-            error_msg = f"PyTorch直接轉TensorRT失敗: {str(e)}"
+            error_msg = f"PyTorch轉換TensorRT失敗: {str(e)}"
             print(error_msg)
             import traceback
             print(traceback.format_exc())
